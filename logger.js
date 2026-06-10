@@ -21,15 +21,19 @@ function alreadyApplied(jobId) {
 
 function appliedTodayCount(platform) {
   const log = loadLog();
+  if (!platform || typeof platform !== 'string') return 0;
   const today = new Date().toISOString().slice(0, 10);
+  const pLow = platform.toLowerCase();
   return log.filter(
-    (e) => e.platform.toLowerCase() === platform.toLowerCase() && e.status === 'applied' && e.appliedAt.startsWith(today)
+    (e) => e && e.platform?.toLowerCase() === pLow && e.status === 'applied' && e.appliedAt?.startsWith(today)
   ).length;
 }
 
 function totalAppliedCount(platform) {
   const log = loadLog();
-  return log.filter((e) => e.platform.toLowerCase() === platform.toLowerCase() && e.status === 'applied').length;
+  if (!platform || typeof platform !== 'string') return 0;
+  const pLow = platform.toLowerCase();
+  return log.filter((e) => e && e.platform?.toLowerCase() === pLow && e.status === 'applied').length;
 }
 
 function recordApplication({ jobId, title, company, platform, status, link }) {
@@ -57,7 +61,8 @@ function printSummary() {
 
   const byPlatform = {};
   for (const entry of applied) {
-    byPlatform[entry.platform] = (byPlatform[entry.platform] || 0) + 1;
+    const pName = entry.platform || 'Unknown';
+    byPlatform[pName] = (byPlatform[pName] || 0) + 1;
   }
 
   console.log('\n╔══════════════════════════════════════╗');

@@ -3,7 +3,7 @@ const fs = require('fs');
 const config = require('./config');
 const { current, expected } = require('./salary-helper');
 
-const anthropicConfig = config.ai.providers.find((p) => p.name === 'anthropic');
+const anthropicConfig = config.ai?.providers?.find((p) => p.name === 'anthropic');
 const client = new Anthropic.Anthropic({ apiKey: anthropicConfig?.apiKey || '' });
 
 let resumeText = '';
@@ -14,10 +14,11 @@ function loadResume() {
     if (fs.existsSync(txtPath)) {
       resumeText = fs.readFileSync(txtPath, 'utf-8');
     } else {
+      const skills = Object.keys(config.skillExperienceYears || {}).join(', ') || 'Software Development';
       resumeText = `
         Name: ${config.name}
         Experience: ${config.experienceYears} years
-        Skills: Full Stack Development, Node.js, React, PostgreSQL, Express.js, JavaScript, TypeScript
+        Skills: ${skills}
         Current CTC: ${current.full()}
         Expected CTC: ${expected.full()}
         Notice Period: ${config.noticePeriod}
@@ -94,11 +95,11 @@ ANSWER (just the value, nothing else):`.trim();
       messages: [{ role: 'user', content: prompt }],
     });
 
-    let answer = response.content[0].text.trim();
+    let answer = response?.content?.[0]?.text?.trim() || '';
 
     answer = answer.replace(/^["']|["']$/g, '').trim();
 
-    if (options.length > 0) {
+    if (options.length > 0 && answer) {
       const match = options.find(
         (o) =>
           o.toLowerCase() === answer.toLowerCase() ||
@@ -106,7 +107,7 @@ ANSWER (just the value, nothing else):`.trim();
           answer.toLowerCase().includes(o.toLowerCase())
       );
       if (match) answer = match;
-      else answer = options[0];
+      else answer = '';
     }
 
     console.log(`✅ AI Answer: "${answer}"`);
@@ -205,7 +206,7 @@ function smartFallback(question, inputType, options) {
     return 'Yes';
   }
 
-  if (options.length > 0) return options[0];
+  if (options.length > 0) return '';
 
   if (inputType === 'number') return String(config.experienceYears);
 

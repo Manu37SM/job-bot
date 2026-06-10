@@ -618,11 +618,13 @@ async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', op
     return String(expected.total());
   }
   if (l.includes('notice')) return config.noticePeriod.replace(/\D/g, '');
-  if (l.includes('experience') || l.includes('year')) {
+  
+  const isExpQuestion = l.includes('experience') || l.includes('year') || l.includes('how many');
+  if (isExpQuestion || Object.keys(config.skillExperienceYears || {}).some(s => l.includes(s.toLowerCase()))) {
     for (const [skill, years] of Object.entries(config.skillExperienceYears || {})) {
       if (l.includes(skill.toLowerCase())) return String(years);
     }
-    return String(config.experienceYears);
+    if (isExpQuestion) return String(config.experienceYears);
   }
   if (l.includes('phone') || l.includes('mobile')) return config.phone;
   if (l.includes('city') || l.includes('current location')) return config.location;
