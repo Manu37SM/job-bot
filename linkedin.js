@@ -4,7 +4,11 @@ const { answerQuestion, generateCoverLetter } = require('./ai');
 const { alreadyApplied, recordApplication, totalAppliedCount } = require('./logger');
 const { getLocationSearchPairs } = require('./location-helper');
 const { current, expected } = require('./salary-helper');
-const { isNumericQuestion } = require('./answer-utils');
+const {
+  asksForSpecificSkillExperience,
+  isNumericQuestion,
+  skillExperienceYearsFor,
+} = require('./answer-utils');
 const { buildNumericCandidates } = require('./field-value');
 
 const DELAYS = { slow: 3000, medium: 1500, fast: 500 };
@@ -620,10 +624,10 @@ async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', op
   if (l.includes('notice')) return config.noticePeriod.replace(/\D/g, '');
   
   const isExpQuestion = l.includes('experience') || l.includes('year') || l.includes('how many');
-  if (isExpQuestion || Object.keys(config.skillExperienceYears || {}).some(s => l.includes(s.toLowerCase()))) {
-    for (const [skill, years] of Object.entries(config.skillExperienceYears || {})) {
-      if (l.includes(skill.toLowerCase())) return String(years);
-    }
+  if (isExpQuestion) {
+    const skillYears = skillExperienceYearsFor(label);
+    if (skillYears != null) return String(skillYears);
+    if (asksForSpecificSkillExperience(label)) return '';
     if (isExpQuestion) return String(config.experienceYears);
   }
   if (l.includes('phone') || l.includes('mobile')) return config.phone;

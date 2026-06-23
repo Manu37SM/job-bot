@@ -60,7 +60,11 @@ test('numeric-looking text questions are treated as numeric', () => {
 });
 
 test('unknown skill-specific experience is not replaced with total experience', () => {
-  assert.equal(deterministicAnswer('How many years of Java experience?', 'number'), '');
+  assert.equal(deterministicAnswer('How many years of Angular experience?', 'number'), '');
+});
+
+test('known skill-specific experience uses configured skill years', () => {
+  assert.equal(deterministicAnswer('How many years of Java experience?', 'number'), '4');
 });
 
 test('provider answers must match a supplied option', () => {

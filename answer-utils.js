@@ -29,6 +29,27 @@ function isNumericQuestion(label, inputType) {
   return /experience|years|month|ctc|salary|compensation|pay|ectc|notice|days|period|hike|increment|mobile|phone|number/.test(l);
 }
 
+function skillExperienceYearsFor(question) {
+  const q = String(question || '').toLowerCase();
+  for (const [skill, years] of Object.entries(config.skillExperienceYears || {})) {
+    if (q.includes(skill.toLowerCase())) return years;
+  }
+  return null;
+}
+
+function asksForSpecificSkillExperience(question) {
+  const q = String(question || '').toLowerCase();
+  if (!/experience|years?/.test(q)) return false;
+  if (/total|overall|professional|relevant|work experience|experience do you have/.test(q)) {
+    return false;
+  }
+
+  return (
+    /years?\s+(?:of|in|with)\s+[\w#+.\-/ ]+\s+experience/.test(q) ||
+    /experience\s+(?:in|with|on)\s+[\w#+.\-/ ]+/.test(q)
+  );
+}
+
 function deterministicAnswer(question, inputType = 'text', options = []) {
   const q = String(question || '').toLowerCase();
   const yes = () => findOption(options, /\byes\b/i) || 'Yes';
@@ -57,13 +78,14 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
   if (/last working day|lwd/.test(q)) return config.lastWorkingDay;
 
   if (/experience|years? worked|how long/.test(q)) {
-    // Check for specific skill years
-    for (const [skill, years] of Object.entries(config.skillExperienceYears || {})) {
-      if (q.includes(skill.toLowerCase())) {
-        if (/months?/.test(q)) return String(Math.round(years * 12));
-        return String(years);
-      }
+    const skillYears = skillExperienceYearsFor(q);
+    if (skillYears != null) {
+      if (/months?/.test(q)) return String(Math.round(skillYears * 12));
+      return String(skillYears);
     }
+
+    if (asksForSpecificSkillExperience(q)) return '';
+
     if (/months?/.test(q)) return String(Math.round(config.experienceYears * 12));
     return String(config.experienceYears);
   }
@@ -125,4 +147,6 @@ module.exports = {
   normalizeAnswer,
   noticeDays,
   isNumericQuestion,
+  asksForSpecificSkillExperience,
+  skillExperienceYearsFor,
 };
