@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const { deterministicAnswer, isNumericQuestion, normalizeAnswer } = require('../answer-utils');
 const { buildNumericCandidates, isIntegerOnly } = require('../field-value');
+const { getLinkedInJobId } = require('../linkedin');
 
 test('number inputs without an explicit step are integer-only', () => {
   assert.equal(isIntegerOnly({ inputType: 'number', step: '' }), true);
@@ -65,6 +66,15 @@ test('unknown skill-specific experience is not replaced with total experience', 
 
 test('known skill-specific experience uses configured skill years', () => {
   assert.equal(deterministicAnswer('How many years of Java experience?', 'number'), '4');
+});
+
+test('linkedin job id can be read from currentJobId on search urls', () => {
+  assert.equal(
+    getLinkedInJobId(
+      'https://www.linkedin.com/jobs/search/?currentJobId=4429095261&f_E=2%2C3%2C4&keywords=Backend%20Developer'
+    ),
+    '4429095261'
+  );
 });
 
 test('provider answers must match a supplied option', () => {

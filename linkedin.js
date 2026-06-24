@@ -15,6 +15,21 @@ const DELAYS = { slow: 3000, medium: 1500, fast: 500 };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const wait = () => delay(DELAYS[config.speed] || 2000);
 
+function getLinkedInJobId(url) {
+  const value = String(url || '');
+  if (!value) return '';
+
+  const pathMatch = value.match(/\/jobs\/view\/(\d+)/);
+  if (pathMatch?.[1]) return pathMatch[1];
+
+  try {
+    const parsed = new URL(value);
+    return parsed.searchParams.get('currentJobId') || '';
+  } catch {
+    return '';
+  }
+}
+
 async function runLinkedIn() {
   console.log('\n🔵 STARTING LINKEDIN BOT...\n');
 
@@ -143,8 +158,8 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
       const company = await page
         .$eval('.job-details-jobs-unified-top-card__company-name', (el) => el.innerText)
         .catch(() => 'Unknown Company');
-      const jobId = page.url().match(/\/(\d+)/)?.[1];
       const jobLink = page.url();
+      const jobId = getLinkedInJobId(jobLink);
 
       console.log(`\n👀 Checking: ${jobTitle} @ ${company}`);
 
@@ -498,12 +513,8 @@ async function fillLinkedInForm(page, jobTitle, company) {
           console.warn('  Submit was clicked, but LinkedIn did not confirm the application.');
           return false;
         }
-        const notNowBtn =
-          (await page.$('button[aria-label="Not now"]')) ||
-          (await page.$('button:has-text("Not now")')) ||
-          (await page.$('button:has-text("Done")'));
-        if (notNowBtn) {
-          await notNowBtn.click({ force: true }).catch(() => {});
+        const dismissedPopup = await dismissPostSubmitPopup(page);
+        if (dismissedPopup) {
           console.log('  ✅ Dismissed follow popup');
         }
         return true;
@@ -537,6 +548,34 @@ async function confirmSubmission(page) {
     .isVisible()
     .catch(() => false);
   return successText || !modalStillOpen;
+}
+
+async function dismissPostSubmitPopup(page) {
+  const selectors = [
+    'button[aria-label="Not now"]',
+    'button[aria-label="Done"]',
+    'button[aria-label="Dismiss"]',
+    'button:has-text("Not now")',
+    'button:has-text("Done")',
+    'button:has-text("Dismiss")',
+  ];
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    for (const selector of selectors) {
+      const button = page.locator(selector).first();
+      const visible = await button.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      await button.click({ force: true }).catch(() => {});
+      await delay(500);
+      const stillVisible = await button.isVisible().catch(() => false);
+      if (!stillVisible) return true;
+    }
+
+    await delay(750);
+  }
+
+  return false;
 }
 
 async function getInvalidFields(modal) {
@@ -642,4 +681,4 @@ async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', op
   return options[0] || '';
 }
 
-module.exports = { runLinkedIn };
+module.exports = { getLinkedInJobId, runLinkedIn };

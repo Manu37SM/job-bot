@@ -15,8 +15,14 @@ function saveLog(log) {
 }
 
 function alreadyApplied(jobId) {
+  if (jobId == null) return false;
+  const normalizedJobId = String(jobId).trim();
+  if (!normalizedJobId || normalizedJobId === 'undefined' || normalizedJobId === 'null') {
+    return false;
+  }
+
   const log = loadLog();
-  return log.some((e) => e.jobId === String(jobId) && e.status === 'applied');
+  return log.some((e) => e.jobId === normalizedJobId && e.status === 'applied');
 }
 
 function appliedTodayCount(platform) {
