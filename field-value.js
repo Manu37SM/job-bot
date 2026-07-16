@@ -34,18 +34,36 @@ function buildNumericCandidates(answer, label = '', metadata = {}) {
   const q = String(label).toLowerCase();
   const integerOnly = isIntegerOnly(metadata);
   const isSalary = /ctc|salary|compensation|remuneration|pay|ectc/.test(q);
-  const wantsRupees = /rupees|inr|annual salary|per annum|yearly/.test(q);
+  const wantsRupees = /rupees|inr|annual salary|per annum|yearly|lakhs?\s*per\s*annum|lpa/.test(q);
   const values = [];
 
   if (integerOnly) {
     if (isSalary && wantsRupees && Math.abs(value) < 1000) {
+      // Label explicitly asks for INR/rupees/annual figure → convert LPA → rupees.
       values.push(Math.round(value * 100000));
-    } else {
+    } else if (isSalary && Math.abs(value) < 1000) {
+      // Salary field with no unit hint. Try rupees first (LinkedIn's common case),
+      // then the LPA value forced to an integer, so the field validator picks one.
+      values.push(Math.round(value * 100000));
       values.push(Math.round(value), Math.floor(value), Math.ceil(value));
+    } else {
+      // Keep the decimal answer as a fallback even for integer-only fields — some
+      // "number" inputs accept decimals despite step=1 (browsers are inconsistent).
+      // Integer variants come first since a plain <input type=number step=1> will
+      // reject the decimal at checkValidity(); the decimal only wins if accepted.
+      values.push(Math.round(value), Math.floor(value), Math.ceil(value));
+      values.push(value);
+      if (decimalPlaces(value) > 2) values.push(Number(value.toFixed(2)));
     }
   } else {
+    // Field explicitly allows decimals (step="any", step="0.1", etc.). Prefer the
+    // exact value, then rupee conversion for salary, then integer fallbacks.
+    if (isSalary && Math.abs(value) < 1000) {
+      values.push(Math.round(value * 100000));
+    }
     values.push(value);
     if (decimalPlaces(value) > 2) values.push(Number(value.toFixed(2)));
+    values.push(Math.round(value), Math.floor(value), Math.ceil(value));
   }
 
   return [...new Set(values)].filter((candidate) => withinBounds(candidate, metadata)).map(String);

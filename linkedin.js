@@ -15,6 +15,37 @@ const DELAYS = { slow: 3000, medium: 1500, fast: 500 };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const wait = () => delay(DELAYS[config.speed] || 2000);
 
+// Per-job wall-clock guard. A single job form that hangs (modal won't advance,
+// AI call stalls, LinkedIn overlay stuck) must not block the whole run.
+const PER_JOB_TIMEOUT_MS = 120000;
+
+async function withJobTimeout(promise, jobLabel) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Job timed out after ${PER_JOB_TIMEOUT_MS}ms: ${jobLabel}`)),
+      PER_JOB_TIMEOUT_MS
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Like page.$eval but waits for the selector to appear (up to `timeoutMs`) so we
+// don't read "Unknown Role" just because the card detail hadn't rendered yet.
+// Falls back to `fallback` if the selector never shows up.
+async function waitEval(page, selector, fn, fallback, timeoutMs = 8000) {
+  try {
+    await page.waitForSelector(selector, { state: 'attached', timeout: timeoutMs });
+  } catch {
+    return fallback;
+  }
+  return page.$eval(selector, fn).catch(() => fallback);
+}
+
 function getLinkedInJobId(url) {
   const value = String(url || '');
   if (!value) return '';
@@ -51,6 +82,11 @@ async function runLinkedIn() {
     storageState: './session-linkedin.json',
   });
   const page = await context.newPage();
+
+  // Fail fast instead of hanging for the default 30s+ per action when LinkedIn
+  // is slow or a selector is stale. Each action retries at the call site.
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(60000);
 
   try {
     await loginToLinkedIn(page);
@@ -150,23 +186,45 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
       const card = page.locator('.job-card-container').nth(i);
 
       await card.click({ timeout: 10000 });
-      await wait();
+      // Wait for the job details panel (not a fixed sleep) so we read the right
+      // title/company/JD instead of the previous card's content.
+      await Promise.all([
+        page
+          .waitForSelector('.job-details-jobs-unified-top-card__job-title', {
+            timeout: 10000,
+          })
+          .catch(() => {}),
+        page
+          .waitForSelector('.job-details-jobs-unified-top-card__company-name', {
+            timeout: 10000,
+          })
+          .catch(() => {}),
+      ]);
 
-      const jobTitle = await page
-        .$eval('.job-details-jobs-unified-top-card__job-title', (el) => el.innerText)
-        .catch(() => 'Unknown Role');
-      const company = await page
-        .$eval('.job-details-jobs-unified-top-card__company-name', (el) => el.innerText)
-        .catch(() => 'Unknown Company');
+      const jobTitle = await waitEval(
+        page,
+        '.job-details-jobs-unified-top-card__job-title',
+        (el) => el.innerText,
+        'Unknown Role'
+      );
+      const company = await waitEval(
+        page,
+        '.job-details-jobs-unified-top-card__company-name',
+        (el) => el.innerText,
+        'Unknown Company'
+      );
       const jobLink = page.url();
       const jobId = getLinkedInJobId(jobLink);
 
       console.log(`\n👀 Checking: ${jobTitle} @ ${company}`);
 
       if (config.dayShiftOnly) {
-        const jdText = await page
-          .$eval('.jobs-description__content, .job-view-layout', (el) => el.innerText.toLowerCase())
-          .catch(() => '');
+        const jdText = await waitEval(
+          page,
+          '.jobs-description__content, .job-view-layout',
+          (el) => el.innerText.toLowerCase(),
+          ''
+        );
 
         const nightShiftKeywords = [
           'night shift',
@@ -232,7 +290,11 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
 
       let success = false;
       try {
-        success = await fillLinkedInForm(page, jobTitle, company);
+        // Guard the whole form fill so one stuck application can't freeze the run.
+        success = await withJobTimeout(
+          fillLinkedInForm(page, jobTitle, company),
+          `${jobTitle} @ ${company}`
+        );
       } catch (formErr) {
         console.error(`  ⚠️  Unexpected error: ${formErr.message}`);
         console.log('  🔄 Closing modal and moving to next job...');
@@ -323,10 +385,33 @@ async function saveJob(page) {
     await delay(500);
   } catch (e) {}
 }
+async function formSignature(modal) {
+  // Build a compact fingerprint of the visible form state so we can detect when
+  // a "Next"/"Submit" click failed to change anything (the loop is now stuck).
+  try {
+    return await modal.evaluate((root) => {
+      const inputs = Array.from(root.querySelectorAll('input, textarea, select'));
+      const values = inputs
+        .filter((el) => el.offsetParent !== null)
+        .map((el) => `${el.type}|${el.id || el.name || ''}=${el.value || ''}`)
+        .join(';');
+      const buttons = Array.from(root.querySelectorAll('button'))
+        .filter((b) => b.offsetParent !== null)
+        .map((b) => b.getAttribute('aria-label') || b.innerText.trim())
+        .join('|');
+      return `${values}::${buttons}`;
+    });
+  } catch {
+    return '';
+  }
+}
+
 async function fillLinkedInForm(page, jobTitle, company) {
   try {
     let step = 0;
-    const maxSteps = 10;
+    const maxSteps = 12;
+    let lastSignature = '';
+    let stuckCount = 0;
 
     while (step < maxSteps) {
       step++;
@@ -490,7 +575,21 @@ async function fillLinkedInForm(page, jobTitle, company) {
           console.warn(`  Cannot continue; invalid fields: ${invalidFields.join(' | ')}`);
           return false;
         }
-        await nextBtn.click({ force: true });
+        const before = await formSignature(modal);
+        // Re-query the button fresh (DOM may have re-rendered during filling).
+        const freshBtn = (await modal.$('button[aria-label="Continue to next step"]')) || nextBtn;
+        await freshBtn.click({ force: true });
+        await wait();
+        const after = await formSignature(modal);
+        if (before && after && before === after) {
+          stuckCount++;
+          if (stuckCount >= 3) {
+            console.warn('  🔁 Form not advancing after repeated Next clicks — abandoning job.');
+            return false;
+          }
+        } else {
+          stuckCount = 0;
+        }
         continue;
       }
 
@@ -518,6 +617,14 @@ async function fillLinkedInForm(page, jobTitle, company) {
           console.log('  ✅ Dismissed follow popup');
         }
         return true;
+      }
+
+      // No Next/Submit and no Dismiss → nothing to click. If we've already filled
+      // everything and the form didn't advance twice, stop spinning and bail out.
+      stuckCount++;
+      if (stuckCount >= 2) {
+        console.warn('  🔁 No actionable button and form is not advancing — abandoning job.');
+        return false;
       }
 
       const dismissBtn = await modal.$('button[aria-label="Dismiss"]');

@@ -6,6 +6,53 @@ const { current, expected } = require('./salary-helper');
 const anthropicConfig = config.ai?.providers?.find((p) => p.name === 'anthropic');
 const client = new Anthropic.Anthropic({ apiKey: anthropicConfig?.apiKey || '' });
 
+// Hard ceiling on any single AI call. Without this, a hung / rate-limited request
+// freezes the whole bot indefinitely — the #1 cause of the bot "getting stuck".
+const AI_TIMEOUT_MS = 20000;
+
+// Circuit breaker: once we've seen a few consecutive auth/quota/billing errors we
+// assume the API key is exhausted and stop calling the API for the rest of the run.
+// This turns every subsequent unknown question into an instant local answer/skip
+// instead of a 20s-timeout-per-field death spiral.
+const AI_FAILURE_THRESHOLD = 3;
+let consecutiveAiFailures = 0;
+let aiDisabled = false;
+
+function isAuthOrQuotaError(err) {
+  const status = err?.status || err?.response?.status;
+  const msg = String(err?.message || '');
+  // 401 invalid key, 403 forbidden/perms, 429 rate limit/quota, 529 overloaded,
+  // messages mentioning credit/quota/billing exhaustion, OR our own timeout —
+  // repeated timeouts also mean the API is effectively dead for this run.
+  return (
+    status === 401 ||
+    status === 403 ||
+    status === 429 ||
+    status === 529 ||
+    /timed out|timeout|credit|quota|billing|rate limit|insufficient|exceeded|unauthor|aborted/i.test(msg)
+  );
+}
+
+function isAiDisabled() {
+  return aiDisabled;
+}
+
+// Lightweight local answer so failures degrade gracefully without an API call.
+// Uses the deterministic engine + simple heuristics (no network).
+function callWithTimeout(createArgs, maxTokens) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  return client.messages
+    .create({ ...createArgs, max_tokens: maxTokens }, { signal: controller.signal })
+    .catch((err) => {
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw new Error(`AI request timed out after ${AI_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    })
+    .finally(() => clearTimeout(timer));
+}
+
 let resumeText = '';
 function loadResume() {
   if (resumeText) return resumeText;
@@ -56,6 +103,17 @@ async function answerQuestion(
   console.log(`\n🤖 AI answering [${inputType}]: "${question}"`);
   if (options.length) console.log(`   Options: ${options.join(' | ')}`);
 
+  // If the API key is exhausted (or persistently failing), don't even try the
+  // network — go straight to the local fallback to keep the bot moving.
+  if (aiDisabled || !anthropicConfig?.apiKey) {
+    if (!aiDisabled && !anthropicConfig?.apiKey) {
+      // First call of the run with no key — disable once.
+      aiDisabled = true;
+      console.log('⚡ AI disabled (no API key). Using local answers only.');
+    }
+    return smartFallback(question, inputType, options);
+  }
+
   const optionsText = options.length
     ? `AVAILABLE OPTIONS (pick exactly one): ${options.join(' | ')}`
     : '';
@@ -89,11 +147,13 @@ RULES:
 ANSWER (just the value, nothing else):`.trim();
 
   try {
-    const response = await client.messages.create({
-      model: anthropicConfig?.model || 'claude-3-5-sonnet-latest',
-      max_tokens: 100,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await callWithTimeout(
+      {
+        model: anthropicConfig?.model || 'claude-3-5-sonnet-latest',
+        messages: [{ role: 'user', content: prompt }],
+      },
+      100
+    );
 
     let answer = response?.content?.[0]?.text?.trim() || '';
 
@@ -111,10 +171,24 @@ ANSWER (just the value, nothing else):`.trim();
     }
 
     console.log(`✅ AI Answer: "${answer}"`);
+    consecutiveAiFailures = 0; // a success resets the streak
     return answer;
   } catch (err) {
     console.error('AI error:', err.message);
-    return smartFallback(question, inputType, options);
+    if (isAuthOrQuotaError(err)) {
+      consecutiveAiFailures++;
+      if (consecutiveAiFailures >= AI_FAILURE_THRESHOLD && !aiDisabled) {
+        aiDisabled = true;
+        console.log(
+          `⛔ AI disabled for this run — API key exhausted/invalid (${consecutiveAiFailures} auth/quota errors). Using local answers; un-answerable required fields will be saved for manual application.`
+        );
+      }
+    }
+    // Prefer the deterministic engine (it knows salary/experience/notice/etc.)
+    // over the looser smartFallback so AI-down produces fewer blank fields.
+    const local =
+      require('./answer-utils').localFallback(question, inputType, options);
+    return local || smartFallback(question, inputType, options);
   }
 }
 
@@ -216,6 +290,17 @@ function smartFallback(question, inputType, options) {
 async function generateCoverLetter(jobTitle, company, jobDescription = '') {
   console.log(`\n📝 Generating cover letter for ${jobTitle} at ${company}...`);
 
+  const stockLetter = () =>
+    `With ${config.experienceYears} years of full-stack development experience, I am confident I can contribute immediately to ${company}'s engineering goals. My current CTC is ${current.full()} and I am seeking ${expected.full()} with a notice period of ${config.noticePeriod}. I look forward to discussing how my skills align with the ${jobTitle} role.`;
+
+  // Skip the network entirely when AI is exhausted/down — go straight to the
+  // pre-written cover letter so we never block on a dead API.
+  if (aiDisabled || !anthropicConfig?.apiKey) {
+    if (!aiDisabled && !anthropicConfig?.apiKey) aiDisabled = true;
+    console.log('⚡ AI disabled — using stock cover letter.');
+    return stockLetter();
+  }
+
   const prompt = `
 Write a SHORT cover letter (3 sentences) for a job application.
 
@@ -234,18 +319,29 @@ Rules:
 Cover Letter:`.trim();
 
   try {
-    const response = await client.messages.create({
-      model: anthropicConfig?.model || 'claude-3-5-sonnet-latest',
-      max_tokens: 200,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await callWithTimeout(
+      {
+        model: anthropicConfig?.model || 'claude-3-5-sonnet-latest',
+        messages: [{ role: 'user', content: prompt }],
+      },
+      200
+    );
     const letter = response.content[0].text.trim();
     console.log('✅ Cover letter ready');
     return letter;
   } catch (err) {
     console.error('Cover letter error:', err.message);
-    return `With ${config.experienceYears} years of full-stack development experience, I am confident I can contribute immediately to ${company}'s engineering goals. My current CTC is ${current.full()} and I am seeking ${expected.full()} with a notice period of ${config.noticePeriod}. I look forward to discussing how my skills align with the ${jobTitle} role.`;
+    if (isAuthOrQuotaError(err)) {
+      consecutiveAiFailures++;
+      if (consecutiveAiFailures >= AI_FAILURE_THRESHOLD && !aiDisabled) {
+        aiDisabled = true;
+        console.log(
+          `⛔ AI disabled for this run — API key exhausted/invalid (${consecutiveAiFailures} auth/quota errors).`
+        );
+      }
+    }
+    return stockLetter();
   }
 }
 
-module.exports = { answerQuestion, generateCoverLetter };
+module.exports = { answerQuestion, generateCoverLetter, isAiDisabled };
