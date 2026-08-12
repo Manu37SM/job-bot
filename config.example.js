@@ -42,21 +42,6 @@ const config = {
   },
   resumePath: './Resume.pdf',
 
-  ai: {
-    providers: [
-      {
-        name: 'anthropic',
-        apiKey: process.env.ANTHROPIC_API_KEY || '',
-        model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest',
-      },
-      {
-        name: 'openai',
-        apiKey: process.env.OPENAI_API_KEY || '',
-        model: process.env.OPENAI_MODEL || 'gpt-4o',
-      },
-    ],
-  },
-
   speed: 'fast', // or 'medium', 'slow'
   pauseBetweenApps: 2, // seconds
 };

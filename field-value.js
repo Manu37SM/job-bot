@@ -34,11 +34,17 @@ function buildNumericCandidates(answer, label = '', metadata = {}) {
   const q = String(label).toLowerCase();
   const integerOnly = isIntegerOnly(metadata);
   const isSalary = /ctc|salary|compensation|remuneration|pay|ectc/.test(q);
-  const wantsRupees = /rupees|inr|annual salary|per annum|yearly|lakhs?\s*per\s*annum|lpa/.test(q);
+  // "LPA" / "lakhs per annum" mean the field wants the LPA number itself (e.g. 4.7),
+  // NOT rupees — these must never be treated as a rupee-conversion cue.
+  const wantsLPA = /\blpa\b|lakhs?\s*(per\s*annum)?/.test(q);
+  const wantsRupees = !wantsLPA && /rupees|inr|annual salary|per annum|yearly/.test(q);
   const values = [];
 
   if (integerOnly) {
-    if (isSalary && wantsRupees && Math.abs(value) < 1000) {
+    if (isSalary && wantsLPA && Math.abs(value) < 1000) {
+      // Label explicitly says LPA/lakhs → keep the LPA value, no rupee conversion.
+      values.push(Math.round(value), Math.floor(value), Math.ceil(value));
+    } else if (isSalary && wantsRupees && Math.abs(value) < 1000) {
       // Label explicitly asks for INR/rupees/annual figure → convert LPA → rupees.
       values.push(Math.round(value * 100000));
     } else if (isSalary && Math.abs(value) < 1000) {
@@ -57,8 +63,9 @@ function buildNumericCandidates(answer, label = '', metadata = {}) {
     }
   } else {
     // Field explicitly allows decimals (step="any", step="0.1", etc.). Prefer the
-    // exact value, then rupee conversion for salary, then integer fallbacks.
-    if (isSalary && Math.abs(value) < 1000) {
+    // exact value, then rupee conversion for salary (skipped when the label already
+    // says LPA/lakhs, since that means the LPA number itself is wanted).
+    if (isSalary && !wantsLPA && Math.abs(value) < 1000) {
       values.push(Math.round(value * 100000));
     }
     values.push(value);

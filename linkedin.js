@@ -1,14 +1,9 @@
 const { chromium } = require('playwright');
 const config = require('./config');
-const { answerQuestion, generateCoverLetter } = require('./ai');
+const { answerQuestion, generateCoverLetter } = require('./resume-answers');
 const { alreadyApplied, recordApplication, totalAppliedCount } = require('./logger');
 const { getLocationSearchPairs } = require('./location-helper');
-const { current, expected } = require('./salary-helper');
-const {
-  asksForSpecificSkillExperience,
-  isNumericQuestion,
-  skillExperienceYearsFor,
-} = require('./answer-utils');
+const { deterministicAnswer, isNumericQuestion } = require('./answer-utils');
 const { buildNumericCandidates } = require('./field-value');
 
 const DELAYS = { slow: 3000, medium: 1500, fast: 500 };
@@ -751,37 +746,18 @@ async function smartFill(input, answer, label) {
 async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', options = []) {
   const l = label.toLowerCase();
 
-  if (
-    l.includes('current') &&
-    (l.includes('ctc') || l.includes('salary') || l.includes('compensation'))
-  ) {
-    if (l.includes('fixed')) return String(current.fixed());
-    if (l.includes('variable')) return String(current.variable());
-    return String(current.total());
-  }
-  if (
-    (l.includes('expected') || l.includes('desired') || l.includes('ectc')) &&
-    (l.includes('ctc') || l.includes('salary'))
-  ) {
-    if (l.includes('fixed')) return String(expected.fixed());
-    if (l.includes('variable')) return String(expected.variable());
-    return String(expected.total());
-  }
-  if (l.includes('notice')) return config.noticePeriod.replace(/\D/g, '');
-  
-  const isExpQuestion = l.includes('experience') || l.includes('year') || l.includes('how many');
-  if (isExpQuestion) {
-    const skillYears = skillExperienceYearsFor(label);
-    if (skillYears != null) return String(skillYears);
-    if (asksForSpecificSkillExperience(label)) return '';
-    if (isExpQuestion) return String(config.experienceYears);
-  }
-  if (l.includes('phone') || l.includes('mobile')) return config.phone;
-  if (l.includes('city') || l.includes('current location')) return config.location;
+  // LinkedIn profile URL fields are auto-filled by LinkedIn itself; don't guess a value.
   if (l.includes('linkedin') || l.includes('profile url')) return '';
 
+  const answerType = isNumericQuestion(label, inputType) ? 'number' : inputType;
+
+  // Deterministic facts from config.js (salary, notice period, experience, contact
+  // details, etc.) — single source of truth, shared with answer-utils.deterministicAnswer
+  // so this never drifts from the logic used elsewhere (e.g. resume-answers.js).
+  const known = deterministicAnswer(label, answerType, options);
+  if (known) return known;
+
   if (label.trim().length > 2) {
-    const answerType = isNumericQuestion(label, inputType) ? 'number' : inputType;
     return await answerQuestion(label, jobTitle, company, answerType, options);
   }
 

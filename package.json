@@ -1,7 +1,7 @@
 {
   "name": "linkedin-job-bot",
   "version": "1.0.0",
-  "description": "LinkedIn Easy Apply automation with deterministic and AI-assisted answers",
+  "description": "LinkedIn Easy Apply automation with deterministic, CV-based answers (no external AI)",
   "main": "index.js",
   "scripts": {
     "test": "node --test"
@@ -10,7 +10,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.97.1",
     "dotenv": "^17.4.2",
     "playwright": "^1.60.0"
   },

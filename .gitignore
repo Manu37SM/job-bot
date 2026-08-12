@@ -23,6 +23,9 @@ coverage/
 .cache/
 .temp/
 *.pdf
+*.txt
 applications.json
 session-*.json
 config.js
+resume-profile.js
+.claude/
