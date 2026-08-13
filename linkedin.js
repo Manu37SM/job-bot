@@ -72,18 +72,27 @@ async function runLinkedIn() {
     return;
   }
 
-  const browser = await chromium.launch({ headless: false, slowMo: 100 });
-  const context = await browser.newContext({
-    storageState: './session-linkedin.json',
-  });
-  const page = await context.newPage();
+  const sessionFile = './session-linkedin.json';
+  if (!require('fs').existsSync(sessionFile)) {
+    console.log('⚠️  No saved session found!');
+    console.log('   Run:  node save-session.js linkedin');
+    console.log('   Then log in with Google in the browser window.');
+    return;
+  }
 
-  // Fail fast instead of hanging for the default 30s+ per action when LinkedIn
-  // is slow or a selector is stale. Each action retries at the call site.
-  page.setDefaultTimeout(15000);
-  page.setDefaultNavigationTimeout(60000);
+  // Launched before the try so a mid-setup failure (bad storageState, etc.) still
+  // reaches the finally below and the browser process is never left running.
+  const browser = await chromium.launch({ headless: false, slowMo: 100 });
 
   try {
+    const context = await browser.newContext({ storageState: sessionFile });
+    const page = await context.newPage();
+
+    // Fail fast instead of hanging for the default 30s+ per action when LinkedIn
+    // is slow or a selector is stale. Each action retries at the call site.
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(60000);
+
     await loginToLinkedIn(page);
 
     let appliedThisRun = 0;
@@ -120,23 +129,17 @@ async function runLinkedIn() {
 async function loginToLinkedIn(page) {
   console.log('🔐 Loading LinkedIn session...');
 
-  const sessionFile = './session-linkedin.json';
-  if (!require('fs').existsSync(sessionFile)) {
-    console.log('⚠️  No saved session found!');
-    console.log('   Run:  node save-session.js linkedin');
-    console.log('   Then log in with Google in the browser window.');
-    process.exit(1);
-  }
-
   await page.goto('https://www.linkedin.com/feed', {
     waitUntil: 'domcontentloaded',
     timeout: 60000,
   });
   await new Promise((r) => setTimeout(r, 3000));
 
+  // Throw instead of process.exit(1): exiting the whole process here would skip
+  // browser.close() (leaked Chromium process) and skip index.js's summary/other
+  // platforms. The caller's try/finally handles cleanup and a clean error message.
   if (page.url().includes('login') || page.url().includes('authwall')) {
-    console.log('⚠️  Session expired. Please run: node save-session.js linkedin');
-    process.exit(1);
+    throw new Error('Session expired. Run: node save-session.js linkedin');
   }
 
   console.log('✅ LinkedIn session loaded!');
@@ -405,7 +408,6 @@ async function fillLinkedInForm(page, jobTitle, company) {
   try {
     let step = 0;
     const maxSteps = 12;
-    let lastSignature = '';
     let stuckCount = 0;
 
     while (step < maxSteps) {
@@ -513,10 +515,21 @@ async function fillLinkedInForm(page, jobTitle, company) {
           .$eval('label, legend, [data-test-form-element-label]', (el) => el.innerText.trim())
           .catch(() => '');
 
-        const optionLabels = await container.$$eval(
-          '[data-test-text-selectable-option__label], label',
+        // Prefer the specific per-choice label class. Falling back to a generic
+        // `label` selector (as before) could also match the question's own
+        // label/legend if it happens to be a <label> element, injecting the
+        // question text itself as a bogus radio "option".
+        let optionLabels = await container.$$eval(
+          '[data-test-text-selectable-option__label]',
           (els) => els.map((el) => el.innerText.trim()).filter((t) => t.length > 0)
         );
+        if (optionLabels.length === 0) {
+          optionLabels = await container.$$eval(
+            'label',
+            (els, q) => els.map((el) => el.innerText.trim()).filter((t) => t.length > 0 && t !== q),
+            questionLabel
+          );
+        }
 
         const answer = await mapFieldToAnswer(
           questionLabel,
@@ -744,11 +757,6 @@ async function smartFill(input, answer, label) {
 }
 
 async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', options = []) {
-  const l = label.toLowerCase();
-
-  // LinkedIn profile URL fields are auto-filled by LinkedIn itself; don't guess a value.
-  if (l.includes('linkedin') || l.includes('profile url')) return '';
-
   const answerType = isNumericQuestion(label, inputType) ? 'number' : inputType;
 
   // Deterministic facts from config.js (salary, notice period, experience, contact

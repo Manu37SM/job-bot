@@ -5,6 +5,8 @@ const config = {
   email: 'john.doe@example.com',
   phone: '9876543210',
   location: 'Mumbai',
+  linkedinUrl: 'https://www.linkedin.com/in/johndoe',
+  githubUrl: 'https://github.com/johndoe',
 
   currentCTC: {
     fixed: 5,

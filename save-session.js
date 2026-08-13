@@ -5,11 +5,11 @@ async function main() {
   console.log('Opening LinkedIn login.');
   console.log('Log in manually, return to this terminal, and press Enter.');
 
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'chrome',
-    args: ['--no-sandbox'],
-  });
+  // No `channel: 'chrome'` here — that requires a system-installed Google Chrome,
+  // but the README only has users run `npx playwright install chromium`. Using the
+  // same bundled Chromium as linkedin.js keeps setup working with just that command
+  // and keeps the saved session consistent with the browser that replays it.
+  const browser = await chromium.launch({ headless: false });
 
   const context = await browser.newContext();
   const page = await context.newPage();

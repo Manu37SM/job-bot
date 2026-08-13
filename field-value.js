@@ -36,7 +36,7 @@ function buildNumericCandidates(answer, label = '', metadata = {}) {
   const isSalary = /ctc|salary|compensation|remuneration|pay|ectc/.test(q);
   // "LPA" / "lakhs per annum" mean the field wants the LPA number itself (e.g. 4.7),
   // NOT rupees — these must never be treated as a rupee-conversion cue.
-  const wantsLPA = /\blpa\b|lakhs?\s*(per\s*annum)?/.test(q);
+  const wantsLPA = /\blpa\b|\blakhs?\b/.test(q);
   const wantsRupees = !wantsLPA && /rupees|inr|annual salary|per annum|yearly/.test(q);
   const values = [];
 

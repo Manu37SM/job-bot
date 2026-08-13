@@ -3,7 +3,7 @@
 // API key. This intentionally replaces the old ai.js, which called out to Anthropic.
 const config = require('./config');
 const { current, expected } = require('./salary-helper');
-const { deterministicAnswer, localFallback, matchOption } = require('./answer-utils');
+const { deterministicAnswer, localFallback, matchOption, matchNumericOption } = require('./answer-utils');
 const profile = require('./resume-profile');
 
 function findOption(options, pattern) {
@@ -82,7 +82,19 @@ function answerQuestion(question, jobTitle = '', company = '', inputType = 'text
   // 5. Never leave a field with fixed options blank — that stalls Easy Apply.
   if (!answer && options.length > 0) answer = bestGuessFromOptions(question, options);
 
-  const normalized = options.length ? matchOption(answer, options) || answer : answer;
+  // Resolve against the option list. Numeric answers skip matchOption's loose
+  // substring matching (e.g. "0" is a substring of "30 days" — that would silently
+  // match the wrong option) and go straight to exact/numeric-range matching.
+  const isNumericAnswer = /^-?\d+(?:\.\d+)?$/.test(String(answer).trim());
+  let normalized = answer;
+  if (options.length) {
+    if (isNumericAnswer) {
+      const exact = options.find((o) => String(o).trim() === String(answer).trim());
+      normalized = exact || matchNumericOption(answer, options) || answer;
+    } else {
+      normalized = matchOption(answer, options) || matchNumericOption(answer, options) || answer;
+    }
+  }
   console.log(`✅ Answer: "${normalized}"`);
   return Promise.resolve(normalized);
 }

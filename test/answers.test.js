@@ -139,3 +139,37 @@ test('resume-profile detects skills mentioned in the CV', () => {
   assert.equal(profile.mentionsSkill('Kong Gateway'), true);
   assert.equal(profile.mentionsSkill('Ruby on Rails'), false);
 });
+
+test('numeric facts resolve to range-bucket options instead of returning a bare number', () => {
+  assert.equal(
+    deterministicAnswer('How many years of experience do you have?', 'radio', [
+      '0-1 years',
+      '1-3 years',
+      '3-5 years',
+      '5+ years',
+    ]),
+    '3-5 years'
+  );
+  assert.equal(
+    deterministicAnswer('What is your current CTC?', 'radio', [
+      '0-3 LPA',
+      '3-6 LPA',
+      '6-10 LPA',
+      '10+ LPA',
+    ]),
+    '3-6 LPA'
+  );
+});
+
+test('short numeric answers do not falsely substring-match option text', () => {
+  // "0" is a character-substring of "30 days"/"60 days" — a naive .includes() match
+  // would wrongly pick one of those instead of the nearest real bucket.
+  assert.equal(
+    deterministicAnswer('What is your notice period?', 'radio', ['15 days', '30 days', '60 days', '90 days']),
+    '15 days'
+  );
+  assert.equal(
+    deterministicAnswer('What is your notice period?', 'radio', ['0 days', '15 days', '30 days']),
+    '0 days'
+  );
+});
