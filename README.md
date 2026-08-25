@@ -21,6 +21,36 @@ in answering questions.
 Numeric answers are validated before typing. HTML number fields without a `step` attribute are
 treated as integer-only, because browsers default them to `step=1`.
 
+## Easy Apply Edge Cases Handled
+
+- **Lazy-loaded results list**: LinkedIn only renders ~8-10 job cards in the DOM until the list
+  is scrolled. The bot scrolls the results pane to load every card on the page before counting,
+  and paginates to the next results page (`Page 2`, `Page 3`, …) once a page is exhausted, instead
+  of silently stopping after the first screenful.
+- **Resume upload fields**: some Easy Apply steps ask for a resume via a plain file input rather
+  than LinkedIn's own resume picker. The bot uploads `config.resumePath` to any matching file
+  input whose `accept` list isn't obviously incompatible.
+- **Phone country-code dropdown**: filled from `config.phoneCountryCode` when the form asks for it
+  as a separate field from the phone number.
+- **Typeahead/combobox fields** (city, school, skill autocomplete): after typing, the bot waits for
+  the suggestion listbox and clicks the best-matching option — required, because many of these
+  fields reject the typed text unless a suggestion is explicitly selected.
+- **Multi-select checkbox groups** (e.g. "which of these do you have experience with"): each option
+  is evaluated independently against config/resume facts and checked when it matches, instead of
+  only handling a single required consent checkbox.
+- **External "Apply" buttons**: a button that isn't genuinely labeled "Easy Apply" (the listing
+  redirects off LinkedIn) is skipped rather than automated blindly.
+- **"Already applied" dialogs**: LinkedIn's own already-applied confirmation is recognized and
+  logged as skipped instead of being treated as a form failure.
+- **Session expiry mid-run**: if LinkedIn drops to a login/authwall/checkpoint page during a run
+  (expired cookie, security check), the bot aborts the run cleanly with a clear message instead of
+  failing every remaining job with a confusing error.
+- **Custom (non-native) invalid fields**: in addition to HTML5 `:invalid`, fields flagged with
+  `aria-invalid="true"` (typeahead/combobox widgets that don't use native validation) block
+  "Next"/"Submit" until resolved.
+- **Timing jitter**: a small random delay is added on top of `pauseBetweenApps` so requests don't
+  land at a perfectly regular cadence.
+
 ## Setup
 
 ```powershell
@@ -32,7 +62,9 @@ Copy-Item resume-profile.example.js resume-profile.js
 
 Edit `config.js` with your candidate details. Fill `skillExperienceYears` when LinkedIn asks for
 exact experience in Java, Node.js, React, or another technology — unknown skill-specific
-experience is left unresolved instead of guessing from total experience.
+experience is left unresolved instead of guessing from total experience. Set
+`phoneCountryCode` (e.g. `'+91'`) and `country` for forms that ask for those as separate fields
+from the phone number / city.
 
 Put your resume PDF at the path in `config.resumePath`. For the best answers to open-ended and
 skill questions, also save the extracted text next to it with a `.txt` extension (e.g.

@@ -4,7 +4,9 @@ const config = {
   name: 'John Doe',
   email: 'john.doe@example.com',
   phone: '9876543210',
+  phoneCountryCode: '+91', // used for LinkedIn's separate phone-country-code dropdown
   location: 'Mumbai',
+  country: 'India',
   linkedinUrl: 'https://www.linkedin.com/in/johndoe',
   githubUrl: 'https://github.com/johndoe',
 

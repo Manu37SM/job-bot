@@ -133,7 +133,11 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
 
   if (q.includes('email')) return config.email;
   if (q.includes('phone') || q.includes('mobile')) return config.phone;
+  // "Country code" alone (no "phone"/"mobile") is the phone dial-code dropdown
+  // question some Easy Apply forms ask separately from the number itself.
+  if (/country code/.test(q)) return config.phoneCountryCode || '';
   if (q.includes('current location') || q.includes('city')) return config.location;
+  if (q.includes('country') && !/country code/.test(q)) return config.country || '';
   if (/linkedin/.test(q) && /url|profile|link/.test(q)) return config.linkedinUrl || '';
   if (/github/.test(q) && /url|profile|link/.test(q)) return config.githubUrl || '';
 

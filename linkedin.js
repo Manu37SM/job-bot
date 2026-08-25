@@ -120,7 +120,11 @@ async function runLinkedIn() {
       `\n✅ LinkedIn Done! Applied ${appliedThisRun} this run. Total: ${alreadyDone + appliedThisRun}/${lifetime}`
     );
   } catch (err) {
-    console.error('❌ LinkedIn bot error:', err.message);
+    if (err instanceof SessionExpiredError) {
+      console.error(`❌ ${err.message}`);
+    } else {
+      console.error('❌ LinkedIn bot error:', err.message);
+    }
   } finally {
     await browser.close();
   }
@@ -143,6 +147,81 @@ async function loginToLinkedIn(page) {
   }
 
   console.log('✅ LinkedIn session loaded!');
+}
+
+// Thrown when we detect mid-run that LinkedIn has logged us out / thrown up an
+// authwall (session cookie expired, security checkpoint, etc). Distinct from a
+// per-job error so callers can abort the whole run instead of burning through
+// every remaining job with the same doomed "Session expired" failure.
+class SessionExpiredError extends Error {}
+
+function isAuthWallUrl(url) {
+  const u = String(url || '');
+  return (
+    u.includes('/authwall') ||
+    u.includes('/login') ||
+    u.includes('/checkpoint/') ||
+    u.includes('/uas/login')
+  );
+}
+
+async function assertSessionAlive(page) {
+  if (isAuthWallUrl(page.url())) {
+    throw new SessionExpiredError('Session expired mid-run. Run: node save-session.js linkedin');
+  }
+}
+
+// LinkedIn's results list is virtualized/lazy-loaded — only ~8-10 cards exist in
+// the DOM until the list is scrolled. Without this, `totalJobs` undercounts and
+// the bot silently stops after the first screenful even though more jobs exist
+// on the same results page.
+async function loadAllJobCards(page, maxJobs) {
+  const listSelector = '.jobs-search-results-list, .scaffold-layout__list';
+  let stableRounds = 0;
+  let lastCount = -1;
+
+  for (let round = 0; round < 40; round++) {
+    const count = await page.locator('.job-card-container').count();
+    if (count >= maxJobs || count === lastCount) {
+      stableRounds++;
+    } else {
+      stableRounds = 0;
+    }
+    lastCount = count;
+    if (stableRounds >= 3) break;
+
+    const scrolled = await page
+      .locator(listSelector)
+      .first()
+      .evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+        return true;
+      })
+      .catch(() => false);
+    if (!scrolled) {
+      // Fallback: some layouts scroll the whole page instead of an inner pane.
+      await page.mouse.wheel(0, 2000).catch(() => {});
+    }
+    await delay(400);
+  }
+
+  return page.locator('.job-card-container').count();
+}
+
+// Clicks LinkedIn's results pagination to the given page number. Returns false
+// once there's no such page (end of results) so the caller can move on to the
+// next search instead of looping forever.
+async function goToResultsPage(page, pageNumber) {
+  const nextBtn = page.locator(`button[aria-label="Page ${pageNumber}"]`).first();
+  const visible = await nextBtn.isVisible().catch(() => false);
+  if (!visible) return false;
+
+  await nextBtn.click({ timeout: 10000 }).catch(() => {});
+  await page
+    .waitForSelector('.job-card-container', { timeout: 10000 })
+    .catch(() => {});
+  await wait();
+  return true;
 }
 
 async function searchAndApply(page, position, location, workModes, maxJobs) {
@@ -171,76 +250,108 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
     timeout: 60000,
   });
   await wait();
+  await assertSessionAlive(page);
 
   let applied = 0;
+  const MAX_RESULT_PAGES = 20; // safety cap so a stuck pagination loop can't run forever
 
-  const totalJobs = await page.locator('.job-card-container').count();
-  console.log(`📋 Found ${totalJobs} Easy Apply jobs`);
-
-  for (let i = 0; i < totalJobs; i++) {
+  for (let resultsPage = 1; resultsPage <= MAX_RESULT_PAGES; resultsPage++) {
     if (applied >= maxJobs) break;
 
-    try {
-      const card = page.locator('.job-card-container').nth(i);
+    const totalJobs = await loadAllJobCards(page, maxJobs - applied);
+    console.log(`📋 Page ${resultsPage}: found ${totalJobs} job cards`);
 
-      await card.click({ timeout: 10000 });
-      // Wait for the job details panel (not a fixed sleep) so we read the right
-      // title/company/JD instead of the previous card's content.
-      await Promise.all([
-        page
-          .waitForSelector('.job-details-jobs-unified-top-card__job-title', {
-            timeout: 10000,
-          })
-          .catch(() => {}),
-        page
-          .waitForSelector('.job-details-jobs-unified-top-card__company-name', {
-            timeout: 10000,
-          })
-          .catch(() => {}),
-      ]);
+    for (let i = 0; i < totalJobs; i++) {
+      if (applied >= maxJobs) break;
 
-      const jobTitle = await waitEval(
-        page,
-        '.job-details-jobs-unified-top-card__job-title',
-        (el) => el.innerText,
-        'Unknown Role'
-      );
-      const company = await waitEval(
-        page,
-        '.job-details-jobs-unified-top-card__company-name',
-        (el) => el.innerText,
-        'Unknown Company'
-      );
-      const jobLink = page.url();
-      const jobId = getLinkedInJobId(jobLink);
+      try {
+        await assertSessionAlive(page);
 
-      console.log(`\n👀 Checking: ${jobTitle} @ ${company}`);
+        const card = page.locator('.job-card-container').nth(i);
 
-      if (config.dayShiftOnly) {
-        const jdText = await waitEval(
+        // A card already marked "Applied" in LinkedIn's own UI (e.g. applied via
+        // the site directly, or a previous run before this jobId was logged)
+        // should never be re-opened.
+        const alreadyMarkedApplied = await card
+          .locator('text=/^applied\\b/i')
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (alreadyMarkedApplied) continue;
+
+        await card.scrollIntoViewIfNeeded().catch(() => {});
+        await card.click({ timeout: 10000 });
+        // Wait for the job details panel (not a fixed sleep) so we read the right
+        // title/company/JD instead of the previous card's content.
+        await Promise.all([
+          page
+            .waitForSelector('.job-details-jobs-unified-top-card__job-title', {
+              timeout: 10000,
+            })
+            .catch(() => {}),
+          page
+            .waitForSelector('.job-details-jobs-unified-top-card__company-name', {
+              timeout: 10000,
+            })
+            .catch(() => {}),
+        ]);
+
+        const jobTitle = await waitEval(
           page,
-          '.jobs-description__content, .job-view-layout',
-          (el) => el.innerText.toLowerCase(),
-          ''
+          '.job-details-jobs-unified-top-card__job-title',
+          (el) => el.innerText,
+          'Unknown Role'
         );
+        const company = await waitEval(
+          page,
+          '.job-details-jobs-unified-top-card__company-name',
+          (el) => el.innerText,
+          'Unknown Company'
+        );
+        const jobLink = page.url();
+        const jobId = getLinkedInJobId(jobLink);
 
-        const nightShiftKeywords = [
-          'night shift',
-          'night-shift',
-          'rotational shift',
-          'rotating shift',
-          'evening shift',
-          'graveyard shift',
-          'us shift',
-          'uk shift',
-          'night hours',
-          'nocturnal',
-          'overnight',
-        ];
+        console.log(`\n👀 Checking: ${jobTitle} @ ${company}`);
 
-        const isNightShift = nightShiftKeywords.some((kw) => jdText.includes(kw));
-        if (isNightShift) {
-          console.log('⏭️  Night/Rotational shift detected in JD — skipping');
+        if (config.dayShiftOnly) {
+          const jdText = await waitEval(
+            page,
+            '.jobs-description__content, .job-view-layout',
+            (el) => el.innerText.toLowerCase(),
+            ''
+          );
+
+          const nightShiftKeywords = [
+            'night shift',
+            'night-shift',
+            'rotational shift',
+            'rotating shift',
+            'evening shift',
+            'graveyard shift',
+            'us shift',
+            'uk shift',
+            'night hours',
+            'nocturnal',
+            'overnight',
+          ];
+
+          const isNightShift = nightShiftKeywords.some((kw) => jdText.includes(kw));
+          if (isNightShift) {
+            console.log('⏭️  Night/Rotational shift detected in JD — skipping');
+            recordApplication({
+              jobId,
+              title: jobTitle,
+              company,
+              platform: 'LinkedIn',
+              status: 'skipped',
+              link: jobLink,
+            });
+            continue;
+          }
+        }
+
+        if (alreadyApplied(jobId)) {
+          console.log('⏭️  Already applied, skipping...');
           recordApplication({
             jobId,
             title: jobTitle,
@@ -251,88 +362,129 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           });
           continue;
         }
-      }
 
-      if (alreadyApplied(jobId)) {
-        console.log('⏭️  Already applied, skipping...');
-        recordApplication({
-          jobId,
-          title: jobTitle,
-          company,
-          platform: 'LinkedIn',
-          status: 'skipped',
-          link: jobLink,
-        });
-        continue;
-      }
+        const easyApplyBtn =
+          (await page.$('[data-control-name="jobdetails_topcard_inapply"]')) ||
+          (await page.$('.jobs-apply-button'));
 
-      const easyApplyBtn =
-        (await page.$('[data-control-name="jobdetails_topcard_inapply"]')) ||
-        (await page.$('.jobs-apply-button'));
+        if (!easyApplyBtn) {
+          console.log('⏭️  No Easy Apply button, skipping...');
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'skipped',
+            link: jobLink,
+          });
+          continue;
+        }
 
-      if (!easyApplyBtn) {
-        console.log('⏭️  No Easy Apply button, skipping...');
-        recordApplication({
-          jobId,
-          title: jobTitle,
-          company,
-          platform: 'LinkedIn',
-          status: 'skipped',
-          link: jobLink,
-        });
-        continue;
-      }
+        // Some "Apply" buttons on Easy Apply-filtered searches still redirect off
+        // LinkedIn (the listing is cross-posted). Filling a form we don't control
+        // isn't safe to automate, so only proceed when the button is genuinely
+        // Easy Apply.
+        const btnLabel = await easyApplyBtn
+          .evaluate((el) => (el.getAttribute('aria-label') || el.innerText || '').toLowerCase())
+          .catch(() => '');
+        if (!btnLabel.includes('easy apply')) {
+          console.log('⏭️  "Apply" redirects off LinkedIn, skipping...');
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'skipped',
+            link: jobLink,
+          });
+          continue;
+        }
 
-      await easyApplyBtn.click();
-      await wait();
+        await easyApplyBtn.click();
+        await wait();
 
-      let success = false;
-      try {
-        // Guard the whole form fill so one stuck application can't freeze the run.
-        success = await withJobTimeout(
-          fillLinkedInForm(page, jobTitle, company),
-          `${jobTitle} @ ${company}`
-        );
-      } catch (formErr) {
-        console.error(`  ⚠️  Unexpected error: ${formErr.message}`);
-        console.log('  🔄 Closing modal and moving to next job...');
-        success = false;
-      } finally {
+        // LinkedIn occasionally shows a "You've already applied" confirmation
+        // dialog instead of the application modal (job applied to elsewhere /
+        // before this log existed). Treat it as already-applied, not a failure.
+        const alreadyAppliedDialog = await page
+          .locator('text=/already applied|application already submitted/i')
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (alreadyAppliedDialog) {
+          console.log('⏭️  LinkedIn reports this was already applied to, skipping...');
+          await closeModal(page);
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'skipped',
+            link: jobLink,
+          });
+          continue;
+        }
+
+        let success = false;
+        try {
+          // Guard the whole form fill so one stuck application can't freeze the run.
+          success = await withJobTimeout(
+            fillLinkedInForm(page, jobTitle, company),
+            `${jobTitle} @ ${company}`
+          );
+        } catch (formErr) {
+          if (formErr instanceof SessionExpiredError) throw formErr;
+          console.error(`  ⚠️  Unexpected error: ${formErr.message}`);
+          console.log('  🔄 Closing modal and moving to next job...');
+          success = false;
+        } finally {
+          await closeModal(page);
+        }
+
+        if (success) {
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'applied',
+            link: jobLink,
+          });
+          applied++;
+          console.log(`✅ Applied! (${applied}/${maxJobs})`);
+        } else {
+          await saveJob(page);
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'failed',
+            link: jobLink,
+          });
+          console.log('  💾 Job saved to LinkedIn → apply manually later');
+          console.log('  ➡️  Moving to next job...');
+        }
+
+        // Small jitter on top of the configured pause so requests don't land at a
+        // perfectly regular cadence, which is an easy automation signal.
+        const jitter = Math.floor(Math.random() * 800);
+        await delay(config.pauseBetweenApps * 1000 + jitter);
+      } catch (err) {
+        if (err instanceof SessionExpiredError) throw err;
+        console.error(`  ⚠️  Error on this job: ${err.message}`);
+        console.log('  🔄 Closing modal, saving job, moving to next...');
         await closeModal(page);
-      }
-
-      if (success) {
-        recordApplication({
-          jobId,
-          title: jobTitle,
-          company,
-          platform: 'LinkedIn',
-          status: 'applied',
-          link: jobLink,
-        });
-        applied++;
-        console.log(`✅ Applied! (${applied}/${maxJobs})`);
-      } else {
         await saveJob(page);
-        recordApplication({
-          jobId,
-          title: jobTitle,
-          company,
-          platform: 'LinkedIn',
-          status: 'failed',
-          link: jobLink,
-        });
-        console.log('  💾 Job saved to LinkedIn → apply manually later');
-        console.log('  ➡️  Moving to next job...');
+        await delay(2000);
       }
+    }
 
-      await delay(config.pauseBetweenApps * 1000);
-    } catch (err) {
-      console.error(`  ⚠️  Error on this job: ${err.message}`);
-      console.log('  🔄 Closing modal, saving job, moving to next...');
-      await closeModal(page);
-      await saveJob(page);
-      await delay(2000);
+    if (applied >= maxJobs) break;
+    const wentToNextPage = await goToResultsPage(page, resultsPage + 1);
+    if (!wentToNextPage) {
+      console.log('  📄 No further result pages for this search.');
+      break;
     }
   }
 
@@ -417,10 +569,36 @@ async function fillLinkedInForm(page, jobTitle, company) {
       const modal = await page.$('[data-test-modal-id="easy-apply-modal"]');
       if (!modal) break;
 
+      await handleResumeUpload(modal);
+
       const phoneField = await modal.$('input[id*="phoneNumber"]');
       if (phoneField) {
         const val = await phoneField.inputValue();
         if (!val) await phoneField.fill(config.phone);
+      }
+
+      // A phone country-code dropdown ships as its own <select>, separate from the
+      // number field. Left unset it silently defaults to whatever LinkedIn guesses,
+      // which can mismatch config.phone's country. Filled here (rather than in the
+      // generic <select> loop below) because its label text is often just "Phone
+      // country code" with no useful option list to match against otherwise.
+      const countryCodeSelect = await modal.$(
+        'select[id*="phoneNumber-country"], select[name*="phoneNumberCountryCode"]'
+      );
+      if (countryCodeSelect && config.phoneCountryCode) {
+        const currentVal = await countryCodeSelect.evaluate((el) => el.value).catch(() => '');
+        if (!currentVal || !String(currentVal).includes(config.phoneCountryCode)) {
+          const matched = await countryCodeSelect
+            .evaluate((el, code) => {
+              const opt = Array.from(el.options).find((o) => o.text.includes(code));
+              return opt ? opt.text : '';
+            }, config.phoneCountryCode)
+            .catch(() => '');
+          if (matched) {
+            await countryCodeSelect.selectOption({ label: matched }).catch(() => {});
+            console.log(`  Selected [phone country code] → "${matched}"`);
+          }
+        }
       }
 
       const textInputs = await modal.$$('input[type="text"], input[type="number"]');
@@ -430,7 +608,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const value = await input.inputValue();
         if (value) continue;
 
-        const { label, inputType } = await input.evaluate((el) => ({
+        const { label, inputType, hasCombobox } = await input.evaluate((el) => ({
           label: (
             document.querySelector(`label[for="${el.id}"]`)?.innerText ||
             el.placeholder ||
@@ -438,6 +616,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
             ''
           ).trim(),
           inputType: el.type || 'text',
+          hasCombobox: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
         }));
 
         const answer = await mapFieldToAnswer(label, jobTitle, company, inputType, []);
@@ -446,6 +625,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const filled = await smartFill(input, answer, label);
         if (filled) {
           console.log(`  Filled [${inputType}] "${label}" → "${filled}"`);
+          if (hasCombobox) await resolveTypeahead(modal, input, filled);
         }
       }
 
@@ -559,6 +739,74 @@ async function fillLinkedInForm(page, jobTitle, company) {
           const firstText = await allOptionEls[0].innerText().catch(() => '');
           await allOptionEls[0].click({ force: true }).catch(() => {});
           console.log(`  Selected [radio] "${questionLabel}" → "${firstText}" (fallback)`);
+        }
+      }
+
+      // Multi-select checkbox groups (e.g. "Which of these do you have experience
+      // with?" with several checkboxes under one question) — distinct from a lone
+      // required consent checkbox, which is handled separately below.
+      const checkboxContainers = await modal.$$('[data-test-form-element]');
+      for (const container of checkboxContainers) {
+        const boxes = await container.$$('input[type="checkbox"]');
+        if (boxes.length < 2) continue; // single required checkbox handled below
+
+        const anyChecked = await container.$$('input[type="checkbox"]:checked');
+        if (anyChecked.length > 0) continue;
+
+        const questionLabel = await container
+          .$eval('legend, [data-test-form-element-label]', (el) => el.innerText.trim())
+          .catch(() => '');
+
+        let optionLabels = await container.$$eval(
+          '[data-test-text-selectable-option__label]',
+          (els) => els.map((el) => el.innerText.trim()).filter((t) => t.length > 0)
+        );
+        if (optionLabels.length === 0) {
+          optionLabels = await container.$$eval(
+            'label',
+            (els, q) => els.map((el) => el.innerText.trim()).filter((t) => t.length > 0 && t !== q),
+            questionLabel
+          );
+        }
+        if (optionLabels.length === 0) continue;
+
+        // mapFieldToAnswer resolves through resume-profile skill matching etc. For
+        // a checkbox group we want every option that resolves truthy checked, not
+        // just one — so evaluate each option individually as its own yes/no item.
+        const optionEls = await container.$$('[data-test-text-selectable-option__label]');
+        let anySelected = false;
+        for (let idx = 0; idx < optionLabels.length; idx++) {
+          const optionText = optionLabels[idx];
+          const combinedQuestion = questionLabel
+            ? `${questionLabel} ${optionText}`
+            : optionText;
+          const shouldCheck = await mapFieldToAnswer(
+            combinedQuestion,
+            jobTitle,
+            company,
+            'checkbox',
+            ['Yes', 'No']
+          );
+          if (String(shouldCheck).toLowerCase() === 'yes') {
+            const target = optionEls[idx] || (await container.$$('label'))[idx];
+            if (target) {
+              await target.click({ force: true }).catch(() => {});
+              anySelected = true;
+              console.log(`  Checked [checkbox] "${questionLabel}" → "${optionText}"`);
+            }
+          }
+        }
+
+        // A required checkbox group can't be left fully empty. If nothing matched,
+        // fall back to the first option rather than stalling the form.
+        if (!anySelected) {
+          const isRequired = await container
+            .$eval('input[type="checkbox"]', (el) => el.required || el.closest('[required]') != null)
+            .catch(() => false);
+          if (isRequired && optionEls[0]) {
+            await optionEls[0].click({ force: true }).catch(() => {});
+            console.log(`  Checked [checkbox] "${questionLabel}" → "${optionLabels[0]}" (fallback)`);
+          }
         }
       }
 
@@ -694,18 +942,80 @@ async function dismissPostSubmitPopup(page) {
 }
 
 async function getInvalidFields(modal) {
-  return modal.$$eval('input:invalid, select:invalid, textarea:invalid', (elements) =>
-    elements
-      .filter((element) => element.offsetParent !== null)
-      .map((element) => {
-        const label =
-          document.querySelector(`label[for="${element.id}"]`)?.innerText ||
-          element.getAttribute('placeholder') ||
-          element.getAttribute('name') ||
-          'Unknown field';
-        return `${label.trim()}: ${element.validationMessage || 'invalid value'}`;
-      })
+  return modal.$$eval(
+    // Native HTML5 validity covers plain inputs/selects, but LinkedIn's typeahead
+    // comboboxes and custom widgets don't use real form validation — they flag
+    // themselves with aria-invalid instead, so :invalid alone misses them and lets
+    // "Next" get clicked on a field that will bounce the form silently.
+    'input:invalid, select:invalid, textarea:invalid, [aria-invalid="true"]',
+    (elements) =>
+      elements
+        .filter((element) => element.offsetParent !== null)
+        .map((element) => {
+          const label =
+            document.querySelector(`label[for="${element.id}"]`)?.innerText ||
+            element.getAttribute('placeholder') ||
+            element.getAttribute('name') ||
+            element.getAttribute('aria-label') ||
+            'Unknown field';
+          return `${label.trim()}: ${element.validationMessage || 'invalid value'}`;
+        })
   );
+}
+
+// Some steps ask for a resume upload (and occasionally a separate cover-letter
+// file) via a plain <input type="file">, distinct from LinkedIn's own "choose a
+// previously uploaded resume" card picker. Left untouched this silently blocks
+// "Next"/"Submit" with no validation message the :invalid selector can see.
+async function handleResumeUpload(modal) {
+  const path = require('path');
+  const resumePath = path.resolve(config.resumePath || '');
+  if (!resumePath || !require('fs').existsSync(resumePath)) return;
+
+  const fileInputs = await modal.$$('input[type="file"]');
+  for (const fileInput of fileInputs) {
+    try {
+      const alreadyHasFile = await fileInput.evaluate((el) => el.files && el.files.length > 0);
+      if (alreadyHasFile) continue;
+
+      const accept = await fileInput.evaluate((el) => (el.getAttribute('accept') || '').toLowerCase());
+      // A file input with an accept list that excludes our resume's extension
+      // (e.g. an image-only upload) isn't the resume field — skip it rather than
+      // uploading a file the widget will reject.
+      const ext = path.extname(resumePath).toLowerCase().replace('.', '');
+      if (accept && ext && !accept.includes(ext) && !accept.includes('*')) continue;
+
+      await fileInput.setInputFiles(resumePath);
+      console.log(`  📎 Uploaded resume: ${path.basename(resumePath)}`);
+      await delay(800);
+    } catch (e) {
+      console.warn(`  Could not upload resume to file field: ${e.message}`);
+    }
+  }
+}
+
+// After typing into a combobox/typeahead field (city, school, skill autocomplete),
+// LinkedIn shows a suggestion listbox that must be clicked — the raw typed text
+// often fails validation on its own even though it visually matches an option.
+async function resolveTypeahead(modal, input, typedValue) {
+  const listbox = modal.locator('[role="listbox"] [role="option"], .basic-typeahead__triggered-content li');
+  const count = await listbox.count().catch(() => 0);
+  if (count === 0) return;
+
+  const needle = String(typedValue || '').trim().toLowerCase();
+  let target = listbox.first();
+  if (needle) {
+    for (let i = 0; i < count; i++) {
+      const text = await listbox.nth(i).innerText().catch(() => '');
+      if (text.trim().toLowerCase().includes(needle)) {
+        target = listbox.nth(i);
+        break;
+      }
+    }
+  }
+
+  await target.click({ force: true, timeout: 3000 }).catch(() => {});
+  await delay(300);
 }
 
 async function smartFill(input, answer, label) {
