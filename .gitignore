@@ -31,3 +31,5 @@ resume-profile.js
 .claude/
 needs-review.md
 applications.json.tmp
+applications.json.backup-*
+.bot-state.json

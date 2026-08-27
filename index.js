@@ -1,8 +1,11 @@
-const { runLinkedIn } = require('./linkedin');
+const { runLinkedIn, dryRunTally } = require('./linkedin');
+const { options, printHelp } = require('./cli');
 const { runNaukri } = require('./naukri');
 const { runIndeed } = require('./indeed');
-const { printSummary, totalAppliedCount } = require('./logger');
+const { printSummary, printRunSummary, totalAppliedCount } = require('./logger');
+const { runPreflight } = require('./preflight');
 const { writeReviewReport } = require('./failure-report');
+const { installSignalHandlers, isStopRequested } = require('./shutdown');
 const { printLocationSummary } = require('./location-helper');
 const { printSalarySummary } = require('./salary-helper');
 const config = require('./config');
@@ -14,6 +17,16 @@ const PLATFORMS = {
 };
 
 async function main() {
+  if (options.help) return printHelp();
+
+  // Registered before anything opens a browser, so Ctrl+C at any point still winds
+  // down cleanly and still produces a summary and needs-review.md.
+  installSignalHandlers();
+
+  // Validate the config before opening a browser. Nothing is applied to if this
+  // finds a hard error.
+  if (!runPreflight()) return;
+
   console.log('╔══════════════════════════════════════╗');
   console.log('║        JOB APPLICATION BOT           ║');
   console.log('╚══════════════════════════════════════╝');
@@ -55,7 +68,7 @@ async function main() {
     }
   }
 
-  if (PLATFORMS.naukri) {
+  if (PLATFORMS.naukri && !isStopRequested()) {
     const done = totalAppliedCount('naukri');
     const max = config.maxApplications.naukri?.lifetime || 0;
     if (done >= max) {
@@ -65,7 +78,7 @@ async function main() {
     }
   }
 
-  if (PLATFORMS.indeed) {
+  if (PLATFORMS.indeed && !isStopRequested()) {
     const done = totalAppliedCount('indeed');
     const max = config.maxApplications.indeed?.lifetime || 0;
     if (done >= max) {
@@ -75,6 +88,19 @@ async function main() {
     }
   }
 
+  if (isStopRequested())
+    console.log('\n🛑 Run stopped early — everything below still reflects real progress.');
+
+  if (options.dryRun) {
+    console.log('\n┌─ DRY RUN ' + '─'.repeat(28));
+    console.log(`│ 🧪 Would have applied to : ${dryRunTally.eligible}`);
+    console.log(`│ ⏭️  Screened out          : ${dryRunTally.skipped}`);
+    console.log('│ Nothing was applied to and nothing was logged.');
+    console.log('└' + '─'.repeat(38) + '\n');
+    return;
+  }
+
+  printRunSummary();
   printSummary();
 
   // Regenerate the review report last, so it reflects this run: which questions

@@ -4,7 +4,11 @@
   "description": "LinkedIn Easy Apply automation with deterministic, CV-based answers (no external AI)",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "compact-log": "node compact-log.js",
+    "review": "node -e \"require('./failure-report').writeReviewReport()\"",
+    "audit": "node answers-audit.js",
+    "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\""
   },
   "keywords": [],
   "author": "",

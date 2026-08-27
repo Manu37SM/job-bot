@@ -3,7 +3,13 @@
 // API key. This intentionally replaces the old ai.js, which called out to Anthropic.
 const config = require('./config');
 const { current, expected } = require('./salary-helper');
-const { deterministicAnswer, localFallback, matchOption, matchNumericOption } = require('./answer-utils');
+const {
+  deterministicAnswer,
+  localFallback,
+  matchOption,
+  matchNumericOption,
+} = require('./answer-utils');
+const policy = require('./question-policy');
 const profile = require('./resume-profile');
 
 function findOption(options, pattern) {
@@ -24,18 +30,23 @@ const SPONSOR_WORDS = /sponsor|visa/i;
 function bestGuessFromOptions(question, options) {
   const q = String(question || '').toLowerCase();
 
+  // Nothing is guessed for protected characteristics, eligibility, legal history,
+  // or skill claims. Leaving the field blank stalls the form — and that stall is
+  // reported as an `unanswerable` failure naming this exact question, so it can be
+  // answered once in config.customAnswers instead of being silently invented here.
+  if (!policy.mayGuess(question)) return '';
+
   if (NEGATIVE_WORDS.test(q) || SPONSOR_WORDS.test(q)) {
     return findOption(options, /\bno\b/i) || options[options.length - 1] || '';
   }
   if (
     CONSENT_WORDS.test(q) ||
     /^(do|have|are|can|will|is|has)\b/.test(q) ||
-    /relocat|authoriz|eligible|available/.test(q)
+    /relocat|eligible|available/.test(q)
   ) {
     return findOption(options, /\byes\b/i) || options[0] || '';
   }
-  // Truly ambiguous: still pick something so the form can advance rather than
-  // stalling on a blank required field.
+  // Ambiguous but harmless: pick something so the form can advance.
   return options[0] || '';
 }
 
@@ -52,29 +63,49 @@ function buildTextareaAnswer(question, jobTitle, company) {
   return profile.summary;
 }
 
+// Cover letters used to end with "My current CTC is X, my expectation is Y" —
+// volunteering a salary anchor in free text, before any conversation, to every
+// company. The structured salary fields on the form are still filled; this is about
+// not repeating the number where it isn't asked for. Both parts are configurable.
 function coverLetter(jobTitle, company) {
   const role = jobTitle ? ` for the ${jobTitle} role` : '';
   const at = company ? ` at ${company}` : '';
-  return (
-    `${profile.summary} With ${config.experienceYears} years of experience, I'm confident I can contribute` +
-    `${role}${at} from day one. My current CTC is ${current.full()}, my expectation is ${expected.full()}, ` +
-    `and my notice period is ${config.noticePeriod}.`
-  );
+  const preferences = config.coverLetter || {};
+
+  const parts = [
+    profile.summary,
+    `With ${config.experienceYears} years of experience, I'm confident I can contribute${role}${at} from day one.`,
+  ];
+
+  if (preferences.includeSalary === true) {
+    parts.push(`My current CTC is ${current.full()} and my expectation is ${expected.full()}.`);
+  }
+  if (preferences.includeNotice !== false) {
+    parts.push(`My notice period is ${config.noticePeriod}.`);
+  }
+
+  return parts.join(' ');
 }
 
 function answerQuestion(question, jobTitle = '', company = '', inputType = 'text', options = []) {
   console.log(`\n📄 Filling from CV/config [${inputType}]: "${question}"`);
   if (options.length) console.log(`   Options: ${options.join(' | ')}`);
 
+  // 0. Anything the candidate has answered by hand in config.customAnswers wins
+  //    outright — this is the loop that needs-review.md closes.
+  let answer = policy.customAnswer(question, options);
+  if (answer) console.log('   ↳ matched a config.customAnswers entry');
+
   // 1. Deterministic facts from config.js (salary, notice period, experience, etc.)
-  let answer = deterministicAnswer(question, inputType, options);
+  if (!answer) answer = deterministicAnswer(question, inputType, options);
 
   // 2. Facts sourced from the CV (skills, certifications, education, employers).
   if (!answer) answer = profile.answerFromResume(question, inputType, options);
 
   // 3. Textarea prompts (cover letter, "about yourself", open-ended) built from the
   //    resume summary — never sent to an external model.
-  if (!answer && inputType === 'textarea') answer = buildTextareaAnswer(question, jobTitle, company);
+  if (!answer && inputType === 'textarea')
+    answer = buildTextareaAnswer(question, jobTitle, company);
 
   // 4. Conservative heuristic fallback (yes/no phrasing, generic patterns).
   if (!answer) answer = localFallback(question, inputType, options);

@@ -2,10 +2,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const LOG_FILE = path.join(__dirname, 'applications.json');
+// Overridable so tests can run against a scratch file instead of the real history.
+const LOG_FILE = process.env.JOB_BOT_LOG
+  ? path.resolve(process.env.JOB_BOT_LOG)
+  : path.join(__dirname, 'applications.json');
 
-// How many times a single job may fail before it is retired permanently.
+// How many times a single job may fail before it is set aside.
 const MAX_FAILED_ATTEMPTS = 3;
+
+// ...and how long before it gets one more chance. "Retired permanently" was too
+// strong for a transient failure: LinkedIn changes its markup, and this bot gets
+// fixed. A job written off during a bad week would otherwise never be reconsidered,
+// even after the exact bug that killed it was repaired.
+const RETIRE_COOLDOWN_DAYS = 14;
 
 // Every failure is tagged with one of these codes so the bot can tell the
 // difference between "try again in a second" and "this will fail identically
@@ -43,7 +52,13 @@ function describeCode(code) {
 let fingerprintCache = null;
 function answersFingerprint() {
   if (fingerprintCache) return fingerprintCache;
-  const sources = ['config.js', 'resume-profile.js', 'resume-answers.js', 'answer-utils.js'];
+  const sources = [
+    'config.js',
+    'resume-profile.js',
+    'resume-answers.js',
+    'answer-utils.js',
+    'question-policy.js',
+  ];
   const hash = crypto.createHash('sha1');
   for (const file of sources) {
     const full = path.join(__dirname, file);
@@ -52,6 +67,14 @@ function answersFingerprint() {
     } catch {
       hash.update(`missing:${file}`);
     }
+  }
+  // The CV text answers skill questions, so editing it should un-park jobs too.
+  try {
+    const config = require('./config');
+    const cvText = String(config.resumePath || '').replace(/\.pdf$/i, '.txt');
+    if (cvText) hash.update(fs.readFileSync(path.resolve(__dirname, cvText)));
+  } catch {
+    hash.update('no-cv-text');
   }
   fingerprintCache = hash.digest('hex').slice(0, 12);
   return fingerprintCache;
@@ -70,13 +93,32 @@ function normalizeQuestion(text) {
     .trim();
 }
 
+// There is deliberately no read cache here.
+//
+// An earlier version keyed one on the file's mtime and size, which measured well
+// and was quietly wrong: two writes in the same millisecond that produce the same
+// file length are indistinguishable by stat, so the second read returned the first
+// write's contents. Nanosecond mtime and inode did not fix it — the mount's
+// timestamp granularity is coarser than the write rate.
+//
+// Measured on a 310KB log, a read-and-parse costs ~12ms, and a run makes perhaps a
+// hundred of them: about one second, inside a run that deliberately waits 45-150
+// seconds between applications. That is not a cost worth any risk of a stale read,
+// and a stale read here means re-applying to a job already applied to.
+//
+// `lastGoodLog` is NOT a cache — it is only the fallback for a corrupt file, so a
+// truncated write cannot read as "nothing applied yet" and re-apply to everything.
+let lastGoodLog = null;
+
 function loadLog() {
   if (!fs.existsSync(LOG_FILE)) return [];
   try {
     const parsed = JSON.parse(fs.readFileSync(LOG_FILE, 'utf-8'));
-    return Array.isArray(parsed) ? parsed : [];
+    lastGoodLog = Array.isArray(parsed) ? parsed : [];
+    return lastGoodLog;
   } catch {
-    return [];
+    console.warn('⚠️  applications.json could not be parsed; using the last known good copy.');
+    return lastGoodLog || [];
   }
 }
 
@@ -87,6 +129,21 @@ function saveLog(log) {
   const tmp = `${LOG_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(log, null, 2));
   fs.renameSync(tmp, LOG_FILE);
+  lastGoodLog = log;
+}
+
+// When LinkedIn's job id can't be read from the URL, `String(jobId)` produced the
+// literal "undefined" for every such job — so they all shared one row in the log,
+// one entry in openFailures(), and one bucket in the skip dedup. Synthesise a
+// stable key from what we do know instead, so they stay distinct.
+function syntheticId(title, company) {
+  const slug = (text) =>
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40) || 'unknown';
+  return `x:${slug(title)}:${slug(company)}`;
 }
 
 function normalizeId(jobId) {
@@ -100,6 +157,12 @@ function alreadyApplied(jobId) {
   const id = normalizeId(jobId);
   if (!id) return false;
   return loadLog().some((e) => e.jobId === id && e.status === 'applied');
+}
+
+function daysSinceLastAttempt(entry) {
+  const when = Date.parse(entry?.appliedAt || '');
+  if (!Number.isFinite(when)) return null;
+  return (Date.now() - when) / 86400000;
 }
 
 function failuresFor(jobId, log = loadLog()) {
@@ -117,11 +180,16 @@ function shouldSkipJob(jobId) {
   const failures = failuresFor(id);
   if (failures.length === 0) return null;
 
-  if (failures.length >= MAX_FAILED_ATTEMPTS) {
-    return `failed ${failures.length}× already — retired`;
-  }
-
   const last = failures[failures.length - 1];
+
+  if (failures.length >= MAX_FAILED_ATTEMPTS) {
+    const daysSince = daysSinceLastAttempt(last);
+    if (daysSince == null || daysSince < RETIRE_COOLDOWN_DAYS) {
+      return `failed ${failures.length}× already — set aside for ${RETIRE_COOLDOWN_DAYS} days`;
+    }
+    // The cooldown has passed: worth one more look with whatever has changed since.
+    return null;
+  }
   if (last.code && !isTransient(last.code) && last.answersHash === answersFingerprint()) {
     const detail = last.reason ? ` (${last.reason.slice(0, 80)})` : '';
     return `${describeCode(last.code).toLowerCase()}; answers unchanged since${detail}`;
@@ -162,11 +230,13 @@ function recordApplication({
   code,
   reason,
   unanswered,
+  answered,
   blockers,
   attempts,
 }) {
   const log = loadLog();
-  const id = normalizeId(jobId) || String(jobId);
+  const realId = normalizeId(jobId);
+  const id = realId || syntheticId(title, company);
   const now = new Date().toISOString();
 
   // A run re-scans the same search pages, so the same job gets skipped over and
@@ -181,6 +251,7 @@ function recordApplication({
       existing.lastSeenAt = now;
       if (reason) existing.reason = reason;
       saveLog(log);
+      runStats.skipped++;
       console.log(`⏭️  [SKIPPED] ${title} @ ${company}${reason ? ` — ${reason}` : ''}`);
       return;
     }
@@ -195,6 +266,15 @@ function recordApplication({
     link,
     appliedAt: now,
   };
+
+  // What was actually submitted under the candidate's name, capped so the log
+  // stays a reasonable size. This is the record that makes the answer-integrity
+  // rules auditable rather than merely asserted.
+  if (answered?.length) entry.answers = answered.slice(0, 40);
+
+  // Marks an entry whose id had to be synthesised, so a later reader knows the
+  // link is the only reliable way back to the posting.
+  if (!realId) entry.idSynthesised = true;
 
   if (status === 'failed') {
     entry.code = code || 'error';
@@ -213,6 +293,7 @@ function recordApplication({
 
   log.push(entry);
   saveLog(log);
+  noteRunStat(entry);
 
   if (status === 'applied') {
     console.log(`✅ [APPLIED] ${title} @ ${company}`);
@@ -247,6 +328,88 @@ function openFailures(platform) {
   return [...latest.values()];
 }
 
+// Collapse the duplicate "skipped" rows written by every earlier run (one per job
+// per run) into a single row carrying a seen counter. Purely a size/speed fix —
+// no applied or failed history is touched.
+function compactLog() {
+  const log = loadLog();
+  const out = [];
+  const skippedIndex = new Map();
+  let collapsed = 0;
+
+  for (const entry of log) {
+    if (!entry) continue;
+    if (entry.status !== 'skipped') {
+      out.push(entry);
+      continue;
+    }
+    const key = `${entry.jobId}|${entry.platform}`;
+    const existing = skippedIndex.get(key);
+    if (!existing) {
+      skippedIndex.set(key, entry);
+      out.push(entry);
+      continue;
+    }
+    existing.seenCount = (existing.seenCount || 1) + (entry.seenCount || 1);
+    // Keep the most recent sighting so the row still reflects reality.
+    if (String(entry.appliedAt) > String(existing.lastSeenAt || existing.appliedAt)) {
+      existing.lastSeenAt = entry.appliedAt;
+      if (entry.reason) existing.reason = entry.reason;
+    }
+    collapsed++;
+  }
+
+  return { log: out, before: log.length, after: out.length, collapsed };
+}
+
+// Counters for THIS process only. printSummary is all-time, which is the wrong
+// lens right after a run — "did this run go well?" is the question being asked.
+const runStats = { applied: 0, failed: 0, skipped: 0, byCode: {}, blockingQuestions: new Map() };
+
+function noteRunStat(entry) {
+  if (entry.status === 'applied') runStats.applied++;
+  else if (entry.status === 'skipped') runStats.skipped++;
+  else if (entry.status === 'failed') {
+    runStats.failed++;
+    const code = entry.code || '';
+    runStats.byCode[code] = (runStats.byCode[code] || 0) + 1;
+    for (const item of entry.unanswered || []) {
+      const key = normalizeQuestion(item.question);
+      if (!key) continue;
+      const seen = runStats.blockingQuestions.get(key) || { question: item.question, count: 0 };
+      seen.count++;
+      runStats.blockingQuestions.set(key, seen);
+    }
+  }
+}
+
+function printRunSummary() {
+  const total = runStats.applied + runStats.failed + runStats.skipped;
+  if (total === 0) return;
+
+  console.log('\n┌─ THIS RUN ' + '─'.repeat(27));
+  console.log(`│ ✅ Applied : ${runStats.applied}`);
+  console.log(`│ ❌ Failed  : ${runStats.failed}`);
+  console.log(`│ ⏭️  Skipped : ${runStats.skipped}`);
+
+  const codes = Object.entries(runStats.byCode).sort((a, b) => b[1] - a[1]);
+  for (const [code, count] of codes) {
+    console.log(`│    └─ ${describeCode(code).padEnd(32)} ${String(count).padStart(3)}`);
+  }
+
+  const blocking = [...runStats.blockingQuestions.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3);
+  if (blocking.length) {
+    console.log('│');
+    console.log('│ Answer these and the next run gets further:');
+    for (const { question, count } of blocking) {
+      console.log(`│   ${String(count).padStart(3)}× ${question.slice(0, 60)}`);
+    }
+  }
+  console.log('└' + '─'.repeat(38));
+}
+
 function printSummary() {
   const log = loadLog();
   const applied = log.filter((j) => j.status === 'applied');
@@ -271,7 +434,10 @@ function printSummary() {
 
   if (failures.length) {
     const byCode = {};
-    for (const f of failures) byCode[f.code || 'error'] = (byCode[f.code || 'error'] || 0) + 1;
+    for (const f of failures) {
+      const key = f.code || '';
+      byCode[key] = (byCode[key] || 0) + 1;
+    }
     const ordered = Object.entries(byCode).sort((a, b) => b[1] - a[1]);
     for (const [code, count] of ordered) {
       const tag = isTransient(code) ? 'retryable' : 'needs an answer from you';
@@ -308,14 +474,22 @@ module.exports = {
   totalAppliedCount,
   recordApplication,
   printSummary,
+  printRunSummary,
+  runStats,
   shouldSkipJob,
   failuresFor,
   openFailures,
   answersFingerprint,
   isTransient,
   describeCode,
+  daysSinceLastAttempt,
+  RETIRE_COOLDOWN_DAYS,
   loadLog,
+  saveLog,
+  syntheticId,
+  compactLog,
   normalizeQuestion,
+  LOG_FILE,
   FAILURE_CODES,
   MAX_FAILED_ATTEMPTS,
 };

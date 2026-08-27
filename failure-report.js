@@ -1,31 +1,21 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  extractSubject: extractSkill,
+  looksLikeTechnology,
+  classify,
+} = require('./question-policy');
+const {
   openFailures,
   describeCode,
   isTransient,
   normalizeQuestion,
   MAX_FAILED_ATTEMPTS,
+  RETIRE_COOLDOWN_DAYS,
+  daysSinceLastAttempt,
 } = require('./logger');
 
 const REPORT_FILE = path.join(__dirname, 'needs-review.md');
-
-// Pull the technology out of a skill question. The LAST "with"/"in"/"using" is
-// the right one: "How many years of experience do you have with Kubernetes?"
-// has an earlier "of" that would otherwise swallow the whole sentence.
-function extractSkill(question) {
-  const matches = [
-    ...String(question || '').matchAll(
-      /\b(?:with|in|using)\s+([A-Za-z][\w+#.\-]*(?:\s+[A-Za-z][\w+#.\-]*){0,2})/gi
-    ),
-  ];
-  if (!matches.length) return '';
-  const candidate = matches[matches.length - 1][1]
-    .replace(/\b(?:a|an|the|your|this|role|position|job|years?|experience)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return candidate.length >= 2 && candidate.length <= 30 ? candidate : '';
-}
 
 function groupUnanswered(failures) {
   const groups = new Map();
@@ -77,27 +67,84 @@ function jobLine(failure) {
   return url ? `[${where}](${url})` : where;
 }
 
+// A ready-to-paste config.customAnswers entry for one question. This is the
+// escape hatch for everything the bot deliberately refuses to guess at, so the
+// report should hand it over rather than describe it.
+function customAnswerSnippet(group) {
+  const question = String(group.question || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Match on a distinctive slice rather than the whole sentence: the same question
+  // is worded slightly differently by different companies.
+  const keywords = question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s+#.-]/g, ' ')
+    .split(/\s+/)
+    .filter(
+      (w) =>
+        w.length > 3 &&
+        !/^(what|when|where|which|your|have|does|will|with|this|that|from|about|many|much|would|there|their)$/.test(
+          w
+        )
+    )
+    .slice(0, 4)
+    .join('.*');
+  // `answer` is deliberately left EMPTY. Pre-filling it with the form's first
+  // option would put a specific claim in the candidate's mouth — "Male", "Yes, I
+  // work night shifts" — which is precisely what this whole layer exists to stop.
+  // The options are listed alongside so the choice is easy but still theirs.
+  const choices = (group.options || []).length
+    ? `  // options: ${group.options.slice(0, 10).join(' | ')}`
+    : '';
+  const pattern = keywords || question.slice(0, 30).toLowerCase();
+  return `${choices ? choices + '\n  ' : ''}{ match: /${pattern}/i, answer: '' },`;
+}
+
 function suggestFix(group) {
   const q = normalizeQuestion(group.question);
+
+  // Classified questions come first, and by asking question-policy.js rather than
+  // re-deriving the categories here. Duplicating those regexes is how "What is your
+  // date of birth?" ended up with generic advice while "What is your gender?" got
+  // the right answer — the copy had drifted from the original.
+  const kind = classify(group.question);
+  if (kind === 'eeo') {
+    return 'Protected-characteristic question — the bot will not answer it for you. Add a `customAnswers` entry if you want it filled.';
+  }
+  if (kind === 'work_authorization' || kind === 'sponsorship') {
+    return 'Check `authorization.authorizedCountries` in config.js.';
+  }
+  if (kind === 'relocation') {
+    return 'Check `locations` in config.js, or set `willingToRelocate` to a fixed answer.';
+  }
+  if (kind === 'shift') return 'Check `dayShiftOnly` in config.js.';
+  if (kind === 'legal_history') return 'Add a `customAnswers` entry (see below).';
+
   if (/\byears?\b/.test(q) && /experien/.test(q)) {
     const skill = extractSkill(group.question);
-    return skill
+    return skill && looksLikeTechnology(skill)
       ? `Add \`'${skill}': <years>\` to \`skillExperienceYears\` in config.js.`
-      : 'Add the technology to `skillExperienceYears` in config.js.';
+      : 'Add a `customAnswers` entry with the number (see below).';
   }
-  if (/salary|ctc|compensation|rate/.test(q))
-    return 'Check `currentCTC` / `expectedCTC` in config.js.';
-  if (/notice|join|start date|available/.test(q))
-    return 'Check `noticePeriod` / `lastWorkingDay` in config.js.';
-  if (/certif|licen[cs]e/.test(q)) return 'Add it to `certifications` in resume-profile.js.';
-  if (/degree|bachelor|master|graduat|educat|university|college/.test(q))
+  if (/salary|ctc|compensation|\brate\b/.test(q)) return 'Check `currentCTC` / `expectedCTC` in config.js.';
+  if (/notice|join|start date|available/.test(q)) return 'Check `noticePeriod` / `lastWorkingDay` in config.js.';
+  if (/certif|licen[cs]e|credential|accredit/.test(q)) return 'Add it to `certifications` in resume-profile.js.';
+  if (/degree|bachelor|master|graduat|educat|university|college/.test(q)) {
     return 'Add it to `education` in resume-profile.js.';
-  if (/sponsor|visa|work authoriz|right to work/.test(q))
-    return 'Check the authorization answers in config.js.';
-  if (/location|relocat|city|commute/.test(q)) return 'Check `locations` in config.js.';
-  if (/experience|familiar|proficien|knowledge of|worked with/.test(q))
-    return 'Add the technology to `skills` in resume-profile.js.';
-  return 'Add a matching fact to config.js or resume-profile.js.';
+  }
+  if (/location|city|commute/.test(q)) return 'Check `locations` in config.js.';
+
+  if (/experience|familiar|proficien|knowledge of|worked with/.test(q)) {
+    // Only point at the skills list when the question is actually about a
+    // technology. "Experience in fast-paced environments" is not something to add
+    // to `skills`, and saying so sends the reader on a pointless errand.
+    const subject = extractSkill(group.question);
+    return subject && looksLikeTechnology(subject)
+      ? 'Add the technology to `skills` in resume-profile.js.'
+      : 'Not a technology — add a `customAnswers` entry (see below).';
+  }
+
+  return 'Add a `customAnswers` entry (see below).';
 }
 
 function buildReport(failures) {
@@ -117,7 +164,8 @@ function buildReport(failures) {
     `**${failures.length}** job${failures.length === 1 ? '' : 's'} did not go through: ` +
       `**${parked.length}** waiting on an answer from you, ` +
       `**${retryable.length}** will be retried automatically, ` +
-      `**${retired.length}** retired after ${MAX_FAILED_ATTEMPTS} attempts.`
+      `**${retired.length}** set aside after ${MAX_FAILED_ATTEMPTS} attempts ` +
+      `(each gets another chance after ${RETIRE_COOLDOWN_DAYS} days).`
   );
   lines.push('');
 
@@ -138,6 +186,23 @@ function buildReport(failures) {
         `| ${group.jobs.length} | ${question} | ${group.kind || '—'} | ${suggestFix(group)} |`
       );
     }
+    lines.push('');
+
+    lines.push('### Paste-ready answers');
+    lines.push('');
+    lines.push(
+      'Drop the entries you want into `customAnswers` in `config.js`, filling in each `answer`.'
+    );
+    lines.push('They are checked before every other rule, so they always win.');
+    lines.push('');
+    lines.push('```js');
+    lines.push('customAnswers: [');
+    for (const group of questionGroups.slice(0, 15)) {
+      lines.push(`  // ${group.question.replace(/\s+/g, ' ').slice(0, 100)}`);
+      lines.push(`  ${customAnswerSnippet(group)}`);
+    }
+    lines.push('],');
+    lines.push('```');
     lines.push('');
 
     const withOptions = questionGroups.filter((g) => g.options?.length);
@@ -182,9 +247,13 @@ function buildReport(failures) {
   );
   for (const failure of sorted) {
     const attempts = failure.totalFailures || 1;
+    const days = daysSinceLastAttempt(failure);
+    const cooledDown = days != null && days >= RETIRE_COOLDOWN_DAYS;
     const state =
       attempts >= MAX_FAILED_ATTEMPTS
-        ? 'retired'
+        ? cooledDown
+          ? 'set aside, cooldown passed — retried next run'
+          : `set aside (retried after ${RETIRE_COOLDOWN_DAYS} days)`
         : isTransient(failure.code)
           ? 'auto-retry next run'
           : 'waiting on your answers';
@@ -233,6 +302,7 @@ module.exports = {
   groupBlockers,
   normalizeQuestion,
   extractSkill,
+  customAnswerSnippet,
   jobUrl,
   suggestFix,
 };

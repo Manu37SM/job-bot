@@ -28,11 +28,15 @@ test('decimal experience prefers integers for integer-only fields, decimal as la
 
 test('salary is converted to rupees only when the label asks for INR', () => {
   assert.deepEqual(
+    // '4' before '5': an integer-only CURRENT salary field rounds down. Current
+    // CTC is a fact companies verify against payslips, so rounding 4.7 up to 5
+    // overstates it. (Expected CTC is an ask rather than a claim and rounds the
+    // other way — see numeric.test.js.)
     buildNumericCandidates('4.7', 'Current CTC in LPA', {
       inputType: 'number',
       step: '',
     }),
-    ['5', '4']
+    ['4', '5']
   );
   assert.deepEqual(
     buildNumericCandidates('4.7', 'Current annual salary in INR', {

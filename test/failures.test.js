@@ -183,3 +183,59 @@ test('entries from before diagnostics existed are labelled honestly', () => {
   assert.match(describeCode(undefined), /before diagnostics/i);
   assert.equal(describeCode('timeout'), 'Timed out');
 });
+
+test('a job description that says "try again later" does not abort the run', () => {
+  // The page text scanned for throttling includes the job description, so ordinary
+  // English in a posting must not read as LinkedIn's rate-limit notice.
+  const jd = [
+    'Senior Backend Engineer',
+    'We review every application. If you do not hear from us, try again later.',
+    'We move at a fast pace and value unusual activity in open source.',
+  ].join('\n');
+  assert.equal(throttleMessageIn(jd), '');
+  assert.equal(throttleMessageIn(jd, ''), '');
+});
+
+test('the real interstitial is caught wherever it appears', () => {
+  const notice =
+    "We noticed you're applying at a fast pace. To ensure genuine applications get the attention they deserve, we've briefly paused Easy Apply as a safeguard against automated inauthentic activities.";
+  assert.match(throttleMessageIn(notice), /applying at a fast pace/);
+  assert.match(throttleMessageIn('', notice), /applying at a fast pace/);
+  assert.match(throttleMessageIn('Jobs', 'You have reached the daily application limit'), /daily application limit/);
+});
+
+test('ambiguous wording counts only inside an alert or dialog', () => {
+  // "Try again later" in a posting is noise; in a LinkedIn alert it is a throttle.
+  assert.equal(throttleMessageIn('Please try again later if the page fails to load.'), '');
+  assert.match(throttleMessageIn('', 'Something went wrong. Please try again later.'), /try again later/i);
+  assert.match(throttleMessageIn('', 'We detected unusual activity on your account'), /unusual activity/i);
+});
+
+test('every fix suggestion points at the file that actually holds the answer', () => {
+  const expectations = [
+    ['What is your date of birth?', /Protected-characteristic/],
+    ['What is your marital status?', /Protected-characteristic/],
+    ['What is your gender?', /Protected-characteristic/],
+    ['Are you willing to relocate?', /locations.*willingToRelocate/],
+    ['Are you willing to work night shifts?', /dayShiftOnly/],
+    ['Do you have experience with Kubernetes?', /skills.*resume-profile/],
+    ['How many years of experience do you have with Python?', /'Python'.*skillExperienceYears/],
+    ['Are you authorized to work in the US?', /authorizedCountries/],
+    ['What is your expected CTC?', /expectedCTC/],
+    ['Do you hold a PMP certification?', /certifications/],
+    ["Do you have a Master's degree?", /education/],
+    ['What is your notice period?', /noticePeriod/],
+  ];
+  for (const [question, pattern] of expectations) {
+    assert.match(suggestFix({ question }), pattern, question);
+  }
+});
+
+test('a vague capability question is not sent to the skills list', () => {
+  // "Experience in fast-paced environments" is not something to add to `skills`,
+  // and saying so sends the reader on a pointless errand.
+  assert.match(
+    suggestFix({ question: 'Do you have experience working in fast-paced environments?' }),
+    /Not a technology/
+  );
+});
