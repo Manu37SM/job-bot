@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { cleanText, cleanCompany } = require('./text-utils');
 const {
   extractSubject: extractSkill,
   looksLikeTechnology,
@@ -62,7 +63,11 @@ function jobUrl(failure) {
 }
 
 function jobLine(failure) {
-  const where = `${failure.title || 'Unknown role'} @ ${failure.company || 'Unknown company'}`;
+  // Entries logged before the scraper tidied its output still carry raw innerText,
+  // padding and all. Tidy at render time so the report reads the same either way.
+  const title = cleanText(failure.title) || 'Unknown role';
+  const company = cleanCompany(failure.company) || 'Unknown company';
+  const where = `${title} @ ${company}`;
   const url = jobUrl(failure);
   return url ? `[${where}](${url})` : where;
 }
@@ -240,31 +245,54 @@ function buildReport(failures) {
     lines.push('');
   }
 
-  lines.push('## Every open job');
-  lines.push('');
-  const sorted = [...failures].sort((a, b) =>
-    String(b.appliedAt).localeCompare(String(a.appliedAt))
-  );
-  for (const failure of sorted) {
-    const attempts = failure.totalFailures || 1;
-    const days = daysSinceLastAttempt(failure);
-    const cooledDown = days != null && days >= RETIRE_COOLDOWN_DAYS;
-    const state =
-      attempts >= MAX_FAILED_ATTEMPTS
-        ? cooledDown
-          ? 'set aside, cooldown passed — retried next run'
-          : `set aside (retried after ${RETIRE_COOLDOWN_DAYS} days)`
-        : isTransient(failure.code)
-          ? 'auto-retry next run'
-          : 'waiting on your answers';
-    lines.push(`- ${jobLine(failure)}`);
-    const detail = failure.reason ? ` — ${failure.reason}` : '';
-    lines.push(`  - ${describeCode(failure.code)}${detail}`);
-    lines.push(
-      `  - attempt ${attempts}/${MAX_FAILED_ATTEMPTS} · ${state} · last tried ${String(failure.appliedAt).slice(0, 16).replace('T', ' ')}`
-    );
+  // Grouped by cause rather than one flat list. A hundred lines of "Every open
+  // job" is not something anyone reads; "26 timed out, 4 need an answer" is.
+  const byCode = new Map();
+  for (const failure of failures) {
+    const key = failure.code || '';
+    if (!byCode.has(key)) byCode.set(key, []);
+    byCode.get(key).push(failure);
   }
+
+  const groups = [...byCode.entries()].sort((a, b) => {
+    // Things the candidate can act on come first.
+    const actionable = (code) => (isTransient(code) ? 1 : 0);
+    if (actionable(a[0]) !== actionable(b[0])) return actionable(a[0]) - actionable(b[0]);
+    return b[1].length - a[1].length;
+  });
+
+  lines.push('## Open jobs by cause');
   lines.push('');
+
+  for (const [code, jobs] of groups) {
+    const note = isTransient(code) ? 'retried automatically' : 'waiting on your answers';
+    lines.push(`### ${describeCode(code)} — ${jobs.length} (${note})`);
+    lines.push('');
+
+    const sorted = [...jobs].sort((a, b) => String(b.appliedAt).localeCompare(String(a.appliedAt)));
+    for (const failure of sorted) {
+      const attempts = failure.totalFailures || 1;
+      const days = daysSinceLastAttempt(failure);
+      const cooledDown = days != null && days >= RETIRE_COOLDOWN_DAYS;
+      const state =
+        attempts >= MAX_FAILED_ATTEMPTS
+          ? cooledDown
+            ? 'set aside, cooldown passed — retried next run'
+            : `set aside (retried after ${RETIRE_COOLDOWN_DAYS} days)`
+          : isTransient(failure.code)
+            ? 'auto-retry next run'
+            : 'waiting on your answers';
+      const when = String(failure.appliedAt).slice(0, 16).replace('T', ' ');
+      lines.push(`- ${jobLine(failure)}`);
+      // The code is already the heading, so only a reason that adds something is
+      // worth repeating under every single row.
+      if (failure.reason && failure.reason !== describeCode(failure.code)) {
+        lines.push(`  - ${failure.reason}`);
+      }
+      lines.push(`  - attempt ${attempts}/${MAX_FAILED_ATTEMPTS} · ${state} · last tried ${when}`);
+    }
+    lines.push('');
+  }
 
   return lines.join('\n');
 }
@@ -295,8 +323,94 @@ function writeReviewReport() {
   return REPORT_FILE;
 }
 
+const DRY_RUN_FILE = path.join(__dirname, 'dry-run.md');
+
+// A dry run's whole point is to answer "are these the right jobs?" before any
+// application is spent. A count on the terminal cannot answer that; a list can.
+function buildDryRunReport({ jobs = [], screened = [] }) {
+  const lines = ['# Dry run', ''];
+  lines.push(`**${jobs.length}** jobs would have been applied to; **${screened.length}** were screened out.`);
+  lines.push('');
+  lines.push('Nothing was applied to and nothing was written to `applications.json`.');
+  lines.push('');
+
+  if (jobs.length) {
+    lines.push('## Would have applied');
+    lines.push('');
+    for (const job of jobs) {
+      const where = `${cleanText(job.title) || 'Unknown role'} @ ${cleanCompany(job.company) || 'Unknown company'}`;
+      lines.push(job.link ? `- [${where}](${job.link})` : `- ${where}`);
+    }
+    lines.push('');
+  }
+
+  if (screened.length) {
+    // Grouped by reason, and ordered so the ones worth acting on come first.
+    // "Already applied" is usually most of the list and is not a decision to
+    // review — collapsing it keeps the rows that ARE decisions visible.
+    const byReason = new Map();
+    for (const job of screened) {
+      const reason = job.reason || 'skipped';
+      if (!byReason.has(reason)) byReason.set(reason, []);
+      byReason.get(reason).push(job);
+    }
+
+    // A reason the candidate might want to change, versus bookkeeping.
+    const actionable = (reason) => !/already applied|per-company cap/i.test(reason);
+
+    const groups = [...byReason.entries()].sort((a, b) => {
+      if (actionable(a[0]) !== actionable(b[0])) return actionable(a[0]) ? -1 : 1;
+      return b[1].length - a[1].length;
+    });
+
+    lines.push('## Screened out');
+    lines.push('');
+    lines.push('If something here looks like a job you wanted, change the rule named beside it.');
+    lines.push('');
+
+    for (const [reason, group] of groups) {
+      lines.push(`### ${reason} — ${group.length}`);
+      lines.push('');
+      if (!actionable(reason)) {
+        // Bookkeeping: the count is the whole message.
+        lines.push(`_${group.length} job${group.length === 1 ? '' : 's'}, listed for completeness._`);
+        lines.push('');
+        lines.push('<details><summary>Show them</summary>');
+        lines.push('');
+      }
+      for (const job of group) {
+        const where = `${cleanText(job.title) || 'Unknown role'} @ ${cleanCompany(job.company) || 'Unknown company'}`;
+        lines.push(job.link ? `- [${where}](${job.link})` : `- ${where}`);
+      }
+      lines.push('');
+      if (!actionable(reason)) {
+        lines.push('</details>');
+        lines.push('');
+      }
+    }
+  }
+
+  if (!jobs.length && !screened.length) {
+    lines.push('No jobs were reached at all. See the warning printed above the summary.');
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+function writeDryRunReport(tally) {
+  try {
+    fs.writeFileSync(DRY_RUN_FILE, buildDryRunReport(tally || {}));
+    return DRY_RUN_FILE;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   writeReviewReport,
+  writeDryRunReport,
+  buildDryRunReport,
   buildReport,
   groupUnanswered,
   groupBlockers,

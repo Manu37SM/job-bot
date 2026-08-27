@@ -8,7 +8,8 @@
     "compact-log": "node compact-log.js",
     "review": "node -e \"require('./failure-report').writeReviewReport()\"",
     "audit": "node answers-audit.js",
-    "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\""
+    "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\"",
+    "mutation": "node mutants.js"
   },
   "keywords": [],
   "author": "",

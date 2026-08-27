@@ -112,7 +112,12 @@ function buildProfile(data) {
   };
 
   function parsePeriodDate(text, { endOfRange = false } = {}) {
-    const value = String(text || '').trim();
+    // Bounded before matching: /([A-Za-z]{3,})\s+(\d{4})/ backtracks quadratically
+    // on a long run of letters, and a real period string ("September 2024") is a
+    // handful of characters. 200 is generous for every date format there is.
+    const value = String(text || '')
+      .slice(0, 200)
+      .trim();
     if (/^(present|current|now|till date|to date)$/i.test(value)) return new Date();
     const match = /([A-Za-z]{3,})\s+(\d{4})/.exec(value) || /(\d{4})/.exec(value);
     if (!match) return null;

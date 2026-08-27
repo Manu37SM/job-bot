@@ -62,3 +62,64 @@ test('every module the README documents actually exists', () => {
   const missing = [...new Set(referenced)].filter((f) => !fs.existsSync(path.join(root, f)));
   assert.deepEqual(missing, [], `README references missing files: ${missing.join(', ')}`);
 });
+
+// Documented default values drift silently: a default changes in config.js and the
+// README keeps quoting the old number. Twice already the README described behaviour
+// the code no longer had.
+function readConfigPath(object, dotted) {
+  return dotted.split('.').reduce((node, key) => (node == null ? node : node[key]), object);
+}
+
+test('every default quoted in the README matches config.js', () => {
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf-8');
+  // Matches: `key` (default 2)   `key` (10)   `search.postedWithinDays` (7)
+  const pattern = /`([a-zA-Z.]+)`\s*\((?:default\s*)?(\d+)\)/g;
+  const mismatches = [];
+
+  for (const [, rawKey, rawValue] of readme.matchAll(pattern)) {
+    const key = rawKey.replace(/^config\./, '');
+    const actual = readConfigPath(config, key);
+    if (actual === undefined) continue; // not a config key (e.g. a function name)
+    if (Number(actual) !== Number(rawValue)) {
+      mismatches.push(`${key}: README says ${rawValue}, config.js has ${actual}`);
+    }
+  }
+
+  assert.deepEqual(mismatches, [], mismatches.join('\n'));
+});
+
+test('the README quotes at least a few real defaults', () => {
+  // Guards the test above from passing because its regex matched nothing.
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf-8');
+  const found = [...readme.matchAll(/`([a-zA-Z.]+)`\s*\((?:default\s*)?(\d+)\)/g)]
+    .map(([, key]) => key.replace(/^config\./, ''))
+    .filter((key) => readConfigPath(config, key) !== undefined);
+  assert.ok(found.length >= 3, `only matched: ${found.join(', ')}`);
+});
+
+test('every mutation-test anchor still applies to the code', () => {
+  // A mutant whose anchor text has moved silently stops testing whatever it was
+  // there to test, and `npm run mutation` keeps reporting a perfect score. Cheap to
+  // check here; a full mutation run is one test suite per mutant.
+  const { MUTANTS } = require('../mutants');
+  const stale = [];
+  for (const [name, file, from] of MUTANTS) {
+    const source = fs.readFileSync(path.join(root, file), 'utf-8');
+    const occurrences = source.split(from).length - 1;
+    if (occurrences !== 1) stale.push(`${name} (${file}): found ${occurrences}, expected 1`);
+  }
+  assert.deepEqual(stale, [], `run \`node mutants.js --anchors\`\n${stale.join('\n')}`);
+});
+
+test('the mutation suite covers every module that makes a decision', () => {
+  const { MUTANTS } = require('../mutants');
+  const covered = new Set(MUTANTS.map(([, file]) => file));
+  const decisionModules = [
+    'question-policy.js', 'answer-utils.js', 'resume-logic.js', 'field-value.js',
+    'linkedin.js', 'logger.js', 'job-fit.js', 'search-filters.js',
+    'failure-report.js', 'preflight.js', 'cooldown.js', 'cli.js', 'shutdown.js',
+    'title-fit.js',
+  ];
+  const uncovered = decisionModules.filter((m) => !covered.has(m));
+  assert.deepEqual(uncovered, [], `no mutant probes: ${uncovered.join(', ')}`);
+});

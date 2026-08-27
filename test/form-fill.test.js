@@ -353,3 +353,134 @@ test('an already-answered field is left alone', async () => {
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(form.steps[0].fields[0].value, 'typed@by.hand', 'a prefilled value must not be overwritten');
 });
+
+const { closeModal } = require('../linkedin');
+
+test('closing the modal escalates until it actually goes', async () => {
+  // Every fallback used to be unreachable: each await inside the try ended in
+  // .catch(() => {}), so nothing could throw, so the catch block holding them
+  // never ran. A modal left open means the next job opens on a stale form.
+  for (const behaviour of ['button', 'escape', 'dom']) {
+    const form = new FakeForm([{ button: 'Next', fields: [] }]);
+    form.dismissBehaviour = behaviour;
+    const closed = await closeModal(makePage(form));
+    assert.equal(closed, true, `behaviour: ${behaviour}`);
+    assert.equal(form.closed, true, `behaviour: ${behaviour}`);
+  }
+});
+
+test('the cheap path is not escalated past unnecessarily', async () => {
+  const form = new FakeForm([{ button: 'Next', fields: [] }]);
+  form.dismissBehaviour = 'button';
+  await closeModal(makePage(form));
+  assert.equal(form.escapePresses, 0, 'Escape should not be needed when the button worked');
+  assert.equal(form.domRemovals, 0, 'the DOM should not be touched when the button worked');
+});
+
+test('Escape is tried before reaching into the DOM', async () => {
+  const form = new FakeForm([{ button: 'Next', fields: [] }]);
+  form.dismissBehaviour = 'escape';
+  await closeModal(makePage(form));
+  assert.ok(form.escapePresses > 0);
+  assert.equal(form.domRemovals, 0);
+});
+
+test('a modal that refuses to close is reported, not assumed gone', async () => {
+  const form = new FakeForm([{ button: 'Next', fields: [] }]);
+  form.dismissBehaviour = 'stuck';
+  const closed = await closeModal(makePage(form));
+  assert.equal(closed, false, 'the caller has to be able to know');
+  assert.ok(form.escapePresses > 0 && form.domRemovals > 0, 'every fallback should have been tried');
+});
+
+test('a radio whose options match no answer is not clicked at random', async () => {
+  // The answer EXISTS here ("Yes") but no option contains it, so the code reaches
+  // its last-resort "click the first option" fallback. For an eligibility question
+  // that fallback is a fabricated claim — the only tested path was the dropdown.
+  const { result, form } = await run([
+    {
+      button: 'Submit',
+      fields: [
+        {
+          kind: 'radio',
+          label: 'Are you legally authorized to work in India?',
+          options: ['I am authorized', 'I am not authorized'],
+          required: true,
+        },
+      ],
+    },
+  ]);
+  assert.equal(result.ok, false);
+  assert.equal(form.submitted, false);
+  assert.deepEqual(form.steps[0].fields[0].selected, [], 'nothing may be clicked at random');
+});
+
+test('the same fallback DOES fire for harmless boilerplate', async () => {
+  // The mirror case: refusing everything would stall forms on questions where any
+  // answer is fine, so the guard has to be selective rather than absolute.
+  const { result, form } = await run([
+    {
+      button: 'Submit',
+      fields: [
+        {
+          kind: 'radio',
+          label: 'Do you agree to the terms and conditions?',
+          options: ['Certainly', 'Never'],
+          required: true,
+        },
+      ],
+    },
+  ]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(form.steps[0].fields[0].selected, ['Certainly']);
+});
+
+test('a blocked field stops the form at that step, not three clicks later', async () => {
+  // The invalid-field check before "Next" was only tested on a submit step. On a
+  // multi-step form the difference matters: without it the bot clicks Next into a
+  // form that will not move and reports `stuck_form` — true, but useless, where
+  // `invalid_field` names the field and its validation message.
+  const { result, form } = await run([
+    { button: 'Next', fields: [{ kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true }] },
+    { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
+  ]);
+  assert.equal(result.code, 'invalid_field', result.reason);
+  assert.match(result.reason, /before "Next"/);
+  assert.match(result.blockers.join(' | '), /Years of experience/);
+  assert.equal(form.index, 0, 'it must not have advanced past the blocked step');
+  assert.equal(form.submitted, false);
+});
+
+test('a step with no problems still advances', async () => {
+  // Guards the test above from passing because nothing ever advances.
+  const { result, form } = await run([
+    { button: 'Next', fields: [{ kind: 'text', label: 'Email address', required: true }] },
+    { button: 'Submit', fields: [{ kind: 'text', label: 'Mobile phone number', required: true }] },
+  ]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(form.index, 1);
+  assert.equal(form.submitted, true);
+});
+
+test('a submit LinkedIn never confirms is not recorded as applied', async () => {
+  // The worst possible false positive: a job logged as applied when it wasn't is
+  // permanent, because alreadyApplied() then blocks it from ever being retried.
+  const form = new FakeForm([
+    { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
+  ]);
+  form.confirmsSubmission = false;
+
+  const result = await fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme');
+  assert.equal(result.ok, false, 'an unconfirmed submit must never read as success');
+  assert.equal(result.code, 'unconfirmed_submit', result.reason);
+});
+
+test('a confirmed submit is recorded as applied', async () => {
+  // The mirror, so the test above cannot pass by refusing everything.
+  const form = new FakeForm([
+    { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
+  ]);
+  form.confirmsSubmission = true;
+  const result = await fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme');
+  assert.equal(result.ok, true, JSON.stringify(result));
+});

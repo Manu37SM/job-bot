@@ -63,3 +63,54 @@ test('the screen can be turned off entirely', () => {
 test('an absurd figure is not treated as a requirement', () => {
   assert.equal(requiredExperienceYears('50 years of experience in the industry'), null);
 });
+
+test('a company boasting about ITS OWN age is not a requirement on you', () => {
+  // These are the cases the proximity window exists for: the pattern matches
+  // ("15+ years") but the sentence is about the company, not the candidate.
+  // Without the check every one of these would skip a perfectly good job.
+  const boilerplate = [
+    'With 15+ years in the market, we serve clients across Asia.',
+    'Our founders bring 20+ years to the industry.',
+    'We have been delivering software for 12+ years.',
+    'Celebrating 10+ years of innovation!',
+    'A 25+ years legacy of engineering excellence.',
+  ];
+  for (const jd of boilerplate) {
+    assert.equal(requiredExperienceYears(jd), null, jd);
+  }
+});
+
+test('the same phrasing IS a requirement when it sits next to "experience"', () => {
+  // The mirror of the case above — the proximity window must not be so tight that
+  // it throws away real requirements.
+  assert.equal(requiredExperienceYears('You bring 5+ years of experience with Java.'), 5);
+  assert.equal(requiredExperienceYears('5+ years experience required'), 5);
+  assert.equal(requiredExperienceYears('Candidates should have 6+ years, ideally with a backend background.'), 6);
+  assert.equal(requiredExperienceYears('7+ yrs in a similar role'), 7);
+  assert.equal(requiredExperienceYears('At least 10 yrs required'), 10);
+});
+
+test('"yrs" counts as "years"', () => {
+  // Postings use the shorthand at least as often as the full word, especially
+  // Indian ones. "Minimum 12 yrs experience" matched nothing at all, so a posting
+  // written that way sailed through the screen as if it stated no requirement.
+  assert.equal(requiredExperienceYears('Minimum 5 yrs experience'), 5);
+  assert.equal(requiredExperienceYears('3-5 yrs of experience'), 3);
+  assert.equal(requiredExperienceYears('12 yrs. of experience required'), 12);
+});
+
+test('the unit is not treated as evidence of an experience context', () => {
+  // "yrs" was in the proximity word list as a proxy for "this is about
+  // experience". Once "yrs" also became a recognised unit it satisfied the check
+  // on its own, and company boilerplate written with the shorthand slipped past.
+  assert.equal(requiredExperienceYears('Our founders bring 20+ yrs to the industry.'), null);
+  assert.equal(requiredExperienceYears('A 25+ yrs legacy of engineering excellence.'), null);
+});
+
+test('company boilerplate does not mask a real requirement elsewhere', () => {
+  const jd = [
+    'With 15+ years in the market, we are a leader in fintech.',
+    'We are looking for someone with 4+ years of experience in Java.',
+  ].join('\n');
+  assert.equal(requiredExperienceYears(jd), 4, 'the requirement must still be found among the noise');
+});

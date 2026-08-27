@@ -1,5 +1,17 @@
 # LinkedIn Job Application Bot
 
+**Start here:** `npm run preflight` checks your config. `npm run audit` shows every
+answer the bot would give without opening a browser. `node index.js --dry-run` walks
+real searches and writes `dry-run.md` without applying to anything. Only then
+`node index.js`.
+
+After a run, `needs-review.md` lists what went wrong and the one line of config that
+fixes each item.
+
+> This automates LinkedIn Easy Apply, which LinkedIn's terms prohibit. Nothing here
+> makes that safe — the pacing and volume limits only reduce the signal. Your account
+> can be restricted. That risk is yours to weigh.
+
 Automates LinkedIn Easy Apply forms with Playwright. Candidate facts come from `config.js` and
 the candidate's CV — there is no external AI provider, no API key, and no network call involved
 in answering questions.
@@ -129,20 +141,30 @@ recorded from this version onward; earlier applications have none.
 ## Easy Apply Edge Cases Handled
 
 - **Lazy-loaded results list**: LinkedIn only renders ~8-10 job cards in the DOM until the list
-  is scrolled. The bot scrolls the results pane to load every card on the page before counting,
-  and paginates to the next results page (`Page 2`, `Page 3`, …) once a page is exhausted, instead
-  of silently stopping after the first screenful.
+  is scrolled. The bot scrolls the results pane until the count stops growing — every card on the
+  page, not just enough to fill the run's budget, because most cards get skipped and stopping
+  early paginates away from jobs that were never looked at. It then moves to `Page 2`, `Page 3`, …
+  once a page is exhausted, instead of silently stopping after the first screenful.
 - **Resume upload fields**: some Easy Apply steps ask for a resume via a plain file input rather
   than LinkedIn's own resume picker. The bot uploads `config.resumePath` to any matching file
   input whose `accept` list isn't obviously incompatible.
 - **Phone country-code dropdown**: filled from `config.phoneCountryCode` when the form asks for it
   as a separate field from the phone number.
-- **Typeahead/combobox fields** (city, school, skill autocomplete): after typing, the bot waits for
-  the suggestion listbox and clicks the best-matching option — required, because many of these
-  fields reject the typed text unless a suggestion is explicitly selected.
+- **Typeahead/combobox fields** (city, school, skill autocomplete): after typing, the bot polls
+  for the suggestion listbox (it renders a moment after the keystrokes) and clicks the matching
+  option — required, because these fields reject typed text unless a suggestion is selected. If no
+  suggestion resembles what was typed it clicks nothing: picking the first one anyway would submit
+  a city or a school nobody chose. The field is then reported as invalid, with its label.
+- **Recovering a stuck modal**: if the application modal cannot be dismissed by button, by Escape,
+  or by removing it from the DOM, the page is reloaded — a modal left open means every remaining
+  job opens on top of a stale form.
+- **Markup changes**: job cards and pagination are looked up through a list of selectors rather
+  than one, and a run that finds no cards in *any* search says so plainly instead of reporting
+  "no jobs" — which is what a broken selector looks like from the outside.
 - **Multi-select checkbox groups** (e.g. "which of these do you have experience with"): each option
   is evaluated independently against config/resume facts and checked when it matches, instead of
-  only handling a single required consent checkbox.
+  only handling a single required consent checkbox. If nothing matches, nothing is ticked — even
+  though that stalls a required group — because ticking the first box to satisfy it invents a skill.
 - **External "Apply" buttons**: a button that isn't genuinely labeled "Easy Apply" (the listing
   redirects off LinkedIn) is skipped rather than automated blindly.
 - **"Already applied" dialogs**: LinkedIn's own already-applied confirmation is recognized and
@@ -153,11 +175,25 @@ recorded from this version onward; earlier applications have none.
 - **Custom (non-native) invalid fields**: in addition to HTML5 `:invalid`, fields flagged with
   `aria-invalid="true"` (typeahead/combobox widgets that don't use native validation) block
   "Next"/"Submit" until resolved.
+- **Targeted searches**: the experience-level filter used to be hard-coded to
+  Entry + Associate + Mid-Senior for everyone. It is now derived from
+  `experienceYears` — 4.1 years searches Associate and Mid-Senior, and not Entry —
+  with overlapping bands so a borderline candidate isn't excluded from either.
+  `search.postedWithinDays` (7) skips postings that have already been filled, and
+  `search.sortByDate` puts the newest first. Both cost nothing and both matter more
+  than anything else here for whether you get a reply.
 - **Failure budgets**: a run's budget counts *successful* applications, so without a
   bound a run could grind for hours on failures and apply to nothing.
   `maxFailuresPerRun` (10) and `maxConsecutiveFailures` (5) stop it — a streak in
   particular usually means something systemic, like a markup change or a half-dead
-  session, rather than bad luck on five separate postings.
+  session, rather than bad luck on five separate postings. Only failures on jobs
+  *never tried before* count toward the streak: a failure on a job that already
+  failed is expected and says nothing about the run's health.
+- **Retry budget**: `maxRetriedFailuresPerRun` (5) caps how many previously-failed
+  jobs one run re-attempts. A backlog of old failures shows up in the same search
+  results as fresh postings and is reached first, so without this a run spends its
+  whole budget on known-bad jobs and applies to nothing new. They come round again
+  next run.
 - **Overlapping searches**: "FullStack Developer" and "Backend Developer" in Mumbai
   return many of the same postings. Each job is opened and screened once per run, not
   once per search term.
@@ -165,6 +201,16 @@ recorded from this version onward; earlier applications have none.
   applications from one person to one company inside an hour reads as spray-and-pray.
   Company names are normalised first, so "Acme Pvt Ltd" and "Acme Private Limited"
   share a counter.
+- **Title screen** (`title-fit.js`): LinkedIn keyword search is loose — searching
+  "FullStack Developer" returns .NET roles, Data Engineer roles and Junior positions.
+  On the first real dry run, **five of the eight** jobs the bot would have applied to
+  were exactly that. The title is screened before the description is even read.
+  It is exclusion-only: a title is skipped only when it positively names a different
+  stack, discipline, or level — never for failing to match something, because
+  "Software Engineer" names nothing and is a perfectly good title. Stack markers are
+  checked against your CV rather than hard-coded, so the list stays right as the CV
+  changes. Frontend-only roles are excluded by default given your stated targets; add
+  `'frontend'` to `titleFilters.allow` to take them.
 - **Experience-fit screen**: a posting that states a minimum well above your
   experience ("10+ years") is skipped before the form opens, because it's a rejection
   at the first human filter and the daily budget is small. It reads the *lowest*
@@ -234,6 +280,14 @@ which jobs it *would* have applied to — without opening a single application f
 writing anything to `applications.json`. Use it after changing `config.js`, and use it
 to verify the pipeline while your account is in a cooldown, when a real run isn't an
 option anyway. It ignores the daily and lifetime caps, since it spends neither.
+
+It writes **`dry-run.md`**: the jobs it would have applied to, and every job it
+skipped, grouped by reason. Reasons you might want to change (an experience screen,
+a night-shift screen) come first; bookkeeping you can't act on ("already applied")
+is collapsed behind a fold, because it is usually most of the list. A count on the terminal tells you the bot
+ran; the list tells you whether those are the right jobs — which is the question a
+dry run is actually asked. If something you wanted appears under "Screened out",
+loosen the rule it names.
 
 It is still a logged-in session clicking through jobs, so browsing is paced too
 (2–6s per job) and the walk stops after a handful of matches unless you pass
@@ -336,6 +390,9 @@ Lower `perDay` and raise the `pacing` values before you resume.
 | `preflight.js` | Config validation before a browser opens |
 | `linkedin.js` | Browser driving: search, pagination, screening, form filling |
 | `job-fit.js` | Reads the stated minimum experience out of a job description |
+| `title-fit.js` | Screens the job title: wrong stack, wrong discipline, wrong level |
+| `search-filters.js` | Builds the LinkedIn search URL: level, work mode, recency |
+| `text-utils.js` | Tidies scraped titles and company names |
 | `question-policy.js` | **Answer integrity** — what may and may not be guessed |
 | `answer-utils.js` | Deterministic answers from `config.js`; option matching |
 | `resume-profile.js` | Your CV as data — 50 lines, no logic |
@@ -364,6 +421,31 @@ reads came back stale — and a stale read here means re-applying to a job you a
 applied to. A read-and-parse costs about 12ms on a 310KB log, perhaps a second across
 a whole run, inside a run that waits 45-150 seconds between applications. There is a
 test that hammers the exact failure mode; please don't reintroduce the cache.
+
+## Mutation Testing
+
+```powershell
+npm run mutation              # break the code 36 ways, check the tests notice
+node mutants.js policy        # only mutants whose name matches
+node mutants.js --anchors     # fast: are all 36 mutants still wired to the code?
+```
+
+A green suite proves the tests **run**, not that they would catch a regression.
+`mutants.js` applies 36 deliberate bugs — each one a real bug this project has had,
+or a rule it depends on — to a **copy** of the project, and reports any that the
+suite fails to notice. A survivor is a gap: that behaviour is not pinned down
+anywhere, and the next person to touch it gets no warning.
+
+It found five real gaps the first time it ran, each one a rule that looked tested
+and wasn't: the proximity check in `job-fit.js` (which then turned up two more bugs
+— "yrs" was not recognised at all, and the unit was being used as its own evidence),
+the refusal guard on radio fallbacks, the invalid-field check on multi-step forms,
+`--limit` being able to *raise* the configured cap, and `confirmSubmission` — where
+a bug would have logged jobs as applied that LinkedIn had rejected, permanently.
+
+Mutations never touch the real files, so an interrupted run cannot leave the repo
+broken. A test in the suite checks that all 36 anchors still apply, so a refactor
+cannot silently disable one.
 
 ## Tests
 

@@ -7,6 +7,7 @@ const {
   totalAppliedCount,
   appliedTodayCount,
   shouldSkipJob,
+  failuresFor,
   isTransient,
   describeCode,
 } = require('./logger');
@@ -16,11 +17,23 @@ const { buildNumericCandidates } = require('./field-value');
 const { isStopRequested, requestStop } = require('./shutdown');
 const policy = require('./question-policy');
 const { assessFit } = require('./job-fit');
+const { assessTitle } = require('./title-fit');
+const { buildSearchUrl, describeFilters } = require('./search-filters');
 const { options } = require('./cli');
 const { recordThrottle, activeHold } = require('./cooldown');
+const { cleanText, cleanCompany } = require('./text-utils');
 
 // Counters for a dry run, where nothing is recorded to the log.
-const dryRunTally = { eligible: 0, skipped: 0 };
+const dryRunTally = { eligible: 0, skipped: 0, jobs: [], screened: [] };
+
+// A dry run's report is only useful if it accounts for every job the bot looked
+// at. Previously only the two job-description screens reported themselves, so a
+// run that saw 60 postings and skipped 55 as already-applied would show 5 and say
+// nothing about the rest — which reads as "the search found almost nothing".
+function noteDryRunSkip(job, reason) {
+  dryRunTally.skipped++;
+  dryRunTally.screened.push({ ...job, reason });
+}
 
 // Run-scoped state. The searches overlap heavily — "FullStack Developer" and
 // "Backend Developer" in Mumbai return many of the same postings — so without this
@@ -34,7 +47,18 @@ const companyApplicationsThisRun = new Map();
 // a run could grind for hours and apply to nothing. Two limits: a total, and a
 // consecutive streak, because a streak usually means something systemic (LinkedIn
 // markup changed, the session is half-dead) rather than bad luck on one posting.
-const failureTally = { total: 0, consecutive: 0 };
+const failureTally = { total: 0, consecutive: 0, retries: 0 };
+
+// Re-attempts of jobs that have failed before, capped per run. Without this a
+// backlog of old failures crowds out fresh postings entirely: they appear in the
+// same search results, they are attempted first because that is the order LinkedIn
+// returns them, and a run whose whole budget went to known-bad jobs applies to
+// nothing new. They are not lost — they come round again next run.
+function retryBudgetSpent() {
+  const cap = Number(config.maxRetriedFailuresPerRun);
+  if (!Number.isFinite(cap) || cap <= 0) return false;
+  return failureTally.retries >= cap;
+}
 
 function failureBudget() {
   return {
@@ -64,8 +88,13 @@ function resetRunState() {
   companyApplicationsThisRun.clear();
   dryRunTally.eligible = 0;
   dryRunTally.skipped = 0;
+  dryRunTally.jobs = [];
+  dryRunTally.screened = [];
   failureTally.total = 0;
   failureTally.consecutive = 0;
+  failureTally.retries = 0;
+  cardsSeenThisRun = 0;
+  workingCardSelector = null;
   appsSinceBreak = 0;
 }
 
@@ -137,6 +166,41 @@ async function waitEval(page, selector, fn, fallback, timeoutMs = 8000) {
   return page.$eval(selector, fn).catch(() => fallback);
 }
 
+// Titles and company names come out of the DOM with newlines, padding, and a
+// trailing " · Mumbai, India" on the company. Left raw they end up in
+// applications.json and needs-review.md exactly as scraped.
+// Tries each selector in turn, so one renamed class doesn't turn every logged job
+// into "Unknown Role @ Unknown Company". Only the first gets a generous wait; the
+// rest are checked quickly, because they only matter when the first has already
+// failed and a per-job budget is not worth spending three times over.
+async function firstText(page, selectors, fallback, clean = cleanText) {
+  for (let i = 0; i < selectors.length; i++) {
+    const text = await waitEval(
+      page,
+      selectors[i],
+      (el) => el.innerText,
+      '',
+      i === 0 ? 8000 : 1200
+    );
+    const cleaned = clean(text);
+    if (cleaned) return cleaned;
+  }
+  return fallback;
+}
+
+const TITLE_SELECTORS = [
+  '.job-details-jobs-unified-top-card__job-title',
+  '.jobs-unified-top-card__job-title',
+  '.job-details-jobs-unified-top-card__job-title h1',
+  'h1.t-24',
+];
+
+const COMPANY_SELECTORS = [
+  '.job-details-jobs-unified-top-card__company-name',
+  '.jobs-unified-top-card__company-name',
+  '.job-details-jobs-unified-top-card__primary-description-container a',
+];
+
 function getLinkedInJobId(url) {
   const value = String(url || '');
   if (!value) return '';
@@ -150,6 +214,16 @@ function getLinkedInJobId(url) {
   } catch {
     return '';
   }
+}
+
+// How many applications this run may make. Extracted so the arithmetic can be
+// tested: `--limit` must only ever TIGHTEN the configured caps. A flag that could
+// raise them would let `--limit 100` blow straight past a deliberately small daily
+// ceiling, which is the one number standing between this bot and a restriction.
+function effectiveRunBudget({ perRun, perDay, lifetime, doneToday, alreadyDone, limit }) {
+  const requested = limit != null ? Math.max(0, Number(limit) || 0) : perRun;
+  const capped = Math.min(perRun, requested);
+  return Math.max(0, Math.min(capped, perDay - doneToday, lifetime - alreadyDone));
 }
 
 async function runLinkedIn() {
@@ -192,10 +266,14 @@ async function runLinkedIn() {
   const alreadyDone = totalAppliedCount('linkedin');
   const doneToday = appliedTodayCount('linkedin');
 
-  // --limit only ever tightens the configured caps; it cannot raise them.
-  const requested = options.limit != null ? Math.max(0, options.limit) : perRun;
-  const effectivePerRun = Math.min(perRun, requested);
-  const canApply = Math.min(effectivePerRun, perDay - doneToday, lifetime - alreadyDone);
+  const canApply = effectiveRunBudget({
+    perRun,
+    perDay,
+    lifetime,
+    doneToday,
+    alreadyDone,
+    limit: options.limit,
+  });
 
   const capNote = options.limit != null ? ` (--limit ${options.limit})` : '';
   console.log(
@@ -263,6 +341,20 @@ async function runLinkedIn() {
         );
         appliedThisRun += count;
       }
+    }
+
+    if (cardsSeenThisRun === 0) {
+      // Every search returned nothing. That is almost never "no jobs" — it is the
+      // page not rendering as expected, which otherwise looks identical to a quiet
+      // job market and can go unnoticed for weeks.
+      console.warn('\n⚠️  No job cards were found in ANY search this run.');
+      console.warn('   That usually means one of:');
+      console.warn('     • the session is stale — run: node save-session.js linkedin');
+      console.warn('     • LinkedIn renamed its job-card markup again');
+      console.warn(
+        '     • the filters in config.js exclude everything (positions, locations, jobTypes)'
+      );
+      console.warn('   Try:  node index.js --dry-run --limit 1   and watch the browser.');
     }
 
     console.log(
@@ -477,18 +569,71 @@ async function assertSessionAlive(page) {
 // the DOM until the list is scrolled. Without this, `totalJobs` undercounts and
 // the bot silently stops after the first screenful even though more jobs exist
 // on the same results page.
-async function loadAllJobCards(page, maxJobs) {
+// LinkedIn renames these classes from time to time. When the one selector the bot
+// knew stopped matching, every search returned zero cards and the run reported
+// "found 0 job cards" — indistinguishable from "there are no jobs", which is how a
+// broken bot looks like a quiet job market for weeks.
+// The Easy Apply modal, named three ways. A single hard-coded attribute here is
+// the highest-consequence selector in the file: if LinkedIn renames it, every job
+// fails as `modal_missing` AND closeModal concludes it has nothing to close.
+// Comma-separated so Playwright tries them all in one query.
+const MODAL_SELECTOR = [
+  '[data-test-modal-id="easy-apply-modal"]',
+  '.jobs-easy-apply-modal',
+  'div[aria-labelledby="jobs-apply-header"]',
+].join(', ');
+
+const JOB_CARD_SELECTORS = [
+  '.job-card-container',
+  '[data-job-id]',
+  'li.scaffold-layout__list-item',
+  '.jobs-search-results__list-item',
+];
+
+// Cards seen across the whole run, so a run that saw none anywhere can say so
+// plainly instead of shrugging.
+let cardsSeenThisRun = 0;
+
+// Returns the first selector that actually matches something, remembering it for
+// the rest of the run so the fallbacks aren't re-tried on every scroll.
+let workingCardSelector = null;
+async function jobCardLocator(page) {
+  if (workingCardSelector) return page.locator(workingCardSelector);
+  for (const selector of JOB_CARD_SELECTORS) {
+    const count = await page
+      .locator(selector)
+      .count()
+      .catch(() => 0);
+    if (count > 0) {
+      workingCardSelector = selector;
+      if (selector !== JOB_CARD_SELECTORS[0]) {
+        console.log(`  ℹ️  Job cards matched "${selector}" (LinkedIn's markup has moved on).`);
+      }
+      return page.locator(selector);
+    }
+  }
+  return page.locator(JOB_CARD_SELECTORS[0]);
+}
+
+async function countJobCards(page) {
+  return (await jobCardLocator(page)).count().catch(() => 0);
+}
+
+// Loads EVERY card on the results page — deliberately not stopping once the run's
+// application budget is reached. The budget counts applications, and most cards are
+// skipped (already applied, parked, screened out), so stopping at eight cards on a
+// page of twenty-five means paginating away from seventeen jobs that were never
+// looked at. Scrolling a full page costs a few seconds; skipping past live postings
+// costs applications that never happen.
+async function loadAllJobCards(page) {
   const listSelector = '.jobs-search-results-list, .scaffold-layout__list';
   let stableRounds = 0;
   let lastCount = -1;
 
   for (let round = 0; round < 40; round++) {
-    const count = await page.locator('.job-card-container').count();
-    if (count >= maxJobs || count === lastCount) {
-      stableRounds++;
-    } else {
-      stableRounds = 0;
-    }
+    const count = await countJobCards(page);
+    if (count === lastCount) stableRounds++;
+    else stableRounds = 0;
     lastCount = count;
     if (stableRounds >= 3) break;
 
@@ -507,42 +652,44 @@ async function loadAllJobCards(page, maxJobs) {
     await delay(400);
   }
 
-  return page.locator('.job-card-container').count();
+  const total = await countJobCards(page);
+  cardsSeenThisRun += total;
+  return total;
 }
 
 // Clicks LinkedIn's results pagination to the given page number. Returns false
 // once there's no such page (end of results) so the caller can move on to the
 // next search instead of looping forever.
 async function goToResultsPage(page, pageNumber) {
-  const nextBtn = page.locator(`button[aria-label="Page ${pageNumber}"]`).first();
-  const visible = await nextBtn.isVisible().catch(() => false);
-  if (!visible) return false;
+  // Same reasoning as the card selectors: one hard-coded aria-label is a single
+  // point of silent failure, and "no next page" is indistinguishable from "the
+  // button is called something else now".
+  const candidates = [
+    `button[aria-label="Page ${pageNumber}"]`,
+    `li[data-test-pagination-page-btn="${pageNumber}"] button`,
+    `button[aria-label="Page ${pageNumber} of "]`,
+  ];
 
-  await nextBtn.click({ timeout: 10000 }).catch(() => {});
-  await page.waitForSelector('.job-card-container', { timeout: 10000 }).catch(() => {});
-  await wait();
-  return true;
+  for (const selector of candidates) {
+    const button = page.locator(selector).first();
+    if (!(await button.isVisible().catch(() => false))) continue;
+    await button.click({ timeout: 10000 }).catch(() => {});
+    await page
+      .waitForSelector(workingCardSelector || JOB_CARD_SELECTORS[0], { timeout: 10000 })
+      .catch(() => {});
+    await wait();
+    return true;
+  }
+  return false;
 }
 
 async function searchAndApply(page, position, location, workModes, maxJobs) {
-  const workModeMap = { onsite: '1', remote: '2', hybrid: '3' };
-  const workModeParam = (workModes || [])
-    .map((m) => workModeMap[m.toLowerCase()])
-    .filter(Boolean)
-    .join(',');
-
-  const jobTypeMap = { permanent: 'F', contract: 'C', internship: 'I' };
-  const jobTypeParam = (config.jobTypes || [])
-    .map((t) => jobTypeMap[t.toLowerCase()])
-    .filter(Boolean)
-    .join(',');
-
-  let searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(position)}&location=${encodeURIComponent(location)}&f_LF=f_AL&f_E=2,3,4`;
-  if (workModeParam) searchUrl += `&f_WT=${workModeParam}`;
-  if (jobTypeParam) searchUrl += `&f_JT=${jobTypeParam}`;
+  const searchUrl = buildSearchUrl({ position, location, workModes });
+  const { levels, postedWithinDays } = describeFilters();
 
   console.log(
-    `  🔗 Mode: [${workModes.join(',')}] | Type: [${config.jobTypes}] | Day Shift: ${config.dayShiftOnly} (JD scan)`
+    `  🔗 Mode: [${workModes.join(',')}] | Type: [${config.jobTypes}] | Level: [${levels.join(',')}]` +
+      `${postedWithinDays ? ` | Posted: last ${postedWithinDays}d` : ''} | Day Shift: ${config.dayShiftOnly} (JD scan)`
   );
 
   await page.goto(searchUrl, {
@@ -558,7 +705,7 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
   for (let resultsPage = 1; resultsPage <= MAX_RESULT_PAGES; resultsPage++) {
     if (applied >= maxJobs) break;
 
-    const totalJobs = await loadAllJobCards(page, maxJobs - applied);
+    const totalJobs = await loadAllJobCards(page);
     console.log(`📋 Page ${resultsPage}: found ${totalJobs} job cards`);
 
     for (let i = 0; i < totalJobs; i++) {
@@ -571,7 +718,7 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
       try {
         await assertSessionAlive(page);
 
-        const card = page.locator('.job-card-container').nth(i);
+        const card = (await jobCardLocator(page)).nth(i);
 
         // A card already marked "Applied" in LinkedIn's own UI (e.g. applied via
         // the site directly, or a previous run before this jobId was logged)
@@ -600,18 +747,8 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             .catch(() => {}),
         ]);
 
-        const jobTitle = await waitEval(
-          page,
-          '.job-details-jobs-unified-top-card__job-title',
-          (el) => el.innerText,
-          'Unknown Role'
-        );
-        const company = await waitEval(
-          page,
-          '.job-details-jobs-unified-top-card__company-name',
-          (el) => el.innerText,
-          'Unknown Company'
-        );
+        const jobTitle = await firstText(page, TITLE_SELECTORS, 'Unknown Role');
+        const company = await firstText(page, COMPANY_SELECTORS, 'Unknown Company', cleanCompany);
         // The results URL carries the job id in a query param, so the raw link
         // reopens the whole search rather than the posting. Store the permalink —
         // applications.json is something you click through months later.
@@ -627,6 +764,10 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
 
         if (alreadyApplied(jobId)) {
           console.log('⏭️  Already applied, skipping...');
+          if (options.dryRun) {
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, 'already applied');
+            continue;
+          }
           recordApplication({
             jobId,
             title: jobTitle,
@@ -644,9 +785,21 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
         // those answer files actually change, and any job is retired outright
         // after MAX_FAILED_ATTEMPTS. Without this, every run re-opens the same
         // doomed forms, burning the per-run budget on jobs that cannot succeed.
+        // How many times this job has failed before — read BEFORE this attempt is
+        // recorded, so it means "prior history", not "including this one".
+        const priorFailures = failuresFor(jobId).length;
+        if (priorFailures > 0 && retryBudgetSpent()) {
+          console.log('⏭️  Retry budget for this run is spent — leaving this one for next time');
+          continue;
+        }
+
         const backoffReason = shouldSkipJob(jobId);
         if (backoffReason) {
           console.log(`⏭️  Skipping — ${backoffReason}`);
+          if (options.dryRun) {
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, backoffReason);
+            continue;
+          }
           recordApplication({
             jobId,
             title: jobTitle,
@@ -655,6 +808,28 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             status: 'skipped',
             link: jobLink,
             reason: backoffReason,
+          });
+          continue;
+        }
+
+        // The cheapest screen of all: the title is already in hand, and a posting
+        // for a different stack, discipline, or level is not worth reading the
+        // description of, let alone opening a form for.
+        const titleFit = assessTitle(jobTitle);
+        if (titleFit.skip) {
+          console.log(`⏭️  Not your role — ${titleFit.reason}`);
+          if (options.dryRun) {
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, titleFit.reason);
+            continue;
+          }
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'skipped',
+            link: jobLink,
+            reason: titleFit.reason,
           });
           continue;
         }
@@ -692,7 +867,10 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           if (isNightShift) {
             console.log('⏭️  Night/Rotational shift detected in JD — skipping');
             if (options.dryRun) {
-              dryRunTally.skipped++;
+              noteDryRunSkip(
+                { title: jobTitle, company, link: jobLink },
+                'night/rotational shift in JD'
+              );
               await browsePause();
               continue;
             }
@@ -717,7 +895,7 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
         if (fit.skip) {
           console.log(`⏭️  Experience mismatch — ${fit.reason}`);
           if (options.dryRun) {
-            dryRunTally.skipped++;
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, fit.reason);
             await browsePause();
             continue;
           }
@@ -737,6 +915,12 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           console.log(
             `⏭️  Already applied to ${company} ${config.maxApplicationsPerCompanyPerRun}× this run — skipping`
           );
+          if (options.dryRun) {
+            noteDryRunSkip(
+              { title: jobTitle, company, link: jobLink },
+              'per-company cap for this run'
+            );
+          }
           continue;
         }
 
@@ -750,6 +934,7 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             .catch(() => '');
           if (btnText.includes('easy apply')) {
             dryRunTally.eligible++;
+            dryRunTally.jobs.push({ title: jobTitle, company, link: jobLink });
             applied++; // counts toward the walk's budget so the dry run terminates
             console.log(`  🧪 DRY RUN — would apply to this job (${dryRunTally.eligible} so far)`);
             console.log(`     ${jobTitle} @ ${company}`);
@@ -761,6 +946,10 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
 
         if (!easyApplyBtn) {
           console.log('⏭️  No Easy Apply button, skipping...');
+          if (options.dryRun) {
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, 'no Easy Apply button');
+            continue;
+          }
           recordApplication({
             jobId,
             title: jobTitle,
@@ -781,6 +970,13 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           .catch(() => '');
         if (!btnLabel.includes('easy apply')) {
           console.log('⏭️  "Apply" redirects off LinkedIn, skipping...');
+          if (options.dryRun) {
+            noteDryRunSkip(
+              { title: jobTitle, company, link: jobLink },
+              'apply redirects off LinkedIn'
+            );
+            continue;
+          }
           recordApplication({
             jobId,
             title: jobTitle,
@@ -824,6 +1020,16 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
 
         const result = await applyWithRetry(page, jobTitle, company);
 
+        // closeModal now reports whether it succeeded, and a modal left open means
+        // every remaining job in the run opens on top of a stale form. A reload
+        // clears it; carrying on regardless is what turns one stuck application
+        // into a run of them.
+        if (await modalPresent(page)) {
+          console.warn('  🔄 Application modal is still open — reloading to recover.');
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await wait();
+        }
+
         if (result.ok) {
           recordApplication({
             jobId,
@@ -857,7 +1063,12 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             attempts: result.attempts,
           });
           failureTally.total++;
-          failureTally.consecutive++;
+          if (priorFailures > 0) failureTally.retries++;
+          // A streak is meant to catch something systemic — a markup change, a
+          // half-dead session. Failures on jobs that already failed before are
+          // expected and say nothing about the run's health, so only failures on
+          // jobs never tried before count toward the streak.
+          if (priorFailures === 0) failureTally.consecutive++;
 
           const exhausted = failureBudgetExhausted();
           if (exhausted) {
@@ -890,29 +1101,52 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
   return applied;
 }
 
+// Closes the Easy Apply modal and CONFIRMS it actually went.
+//
+// The previous version could not fall back: every await inside its `try` ended in
+// `.catch(() => {})`, so nothing could ever throw, so the catch block holding the
+// Escape-key and DOM-removal fallbacks was unreachable. It also never checked the
+// result — and a modal left open means the next job opens on top of a stale form,
+// which is how one stuck application turns into a run of them.
+async function modalPresent(page) {
+  return Boolean(await page.$(MODAL_SELECTOR).catch(() => null));
+}
+
 async function closeModal(page) {
-  try {
-    await page.click('button[aria-label="Dismiss"]', { force: true }).catch(() => {});
-    await delay(500);
+  const clickIfPresent = async (selector) => {
+    await page.click(selector, { force: true, timeout: 3000 }).catch(() => {});
+  };
 
-    await page
-      .click('button[data-control-name="discard_application_confirm_btn"]', { force: true })
-      .catch(() => {});
-    await delay(500);
-    await page.click('button:has-text("Discard")', { force: true }).catch(() => {});
-    return;
-  } catch (e) {
-    try {
-      await page.keyboard.press('Escape');
-      await delay(500);
-    } catch (e2) {}
+  // 1. The ordinary path: dismiss, then confirm the discard prompt.
+  await clickIfPresent('button[aria-label="Dismiss"]');
+  await delay(400);
+  await clickIfPresent('button[data-control-name="discard_application_confirm_btn"]');
+  await delay(400);
+  await clickIfPresent('button:has-text("Discard")');
+  await delay(300);
+  if (!(await modalPresent(page))) return true;
 
-    try {
-      await page.evaluate(() => {
-        document.querySelector('[data-test-modal-id="easy-apply-modal"]')?.remove();
-      });
-    } catch (e3) {}
-  }
+  // 2. Escape, which handles the overlay variants the buttons above miss.
+  await page.keyboard.press('Escape').catch(() => {});
+  await delay(400);
+  await clickIfPresent('button:has-text("Discard")');
+  await delay(300);
+  if (!(await modalPresent(page))) return true;
+
+  // 3. Last resort: take it out of the DOM. Crude, but a stale modal blocks every
+  // remaining job in the run, and this is recoverable where that is not.
+  await page
+    .evaluate((selector) => {
+      document.querySelector(selector)?.remove();
+      document.querySelector('.artdeco-modal-overlay')?.remove();
+      document.body?.classList?.remove('overflow-hidden');
+    }, MODAL_SELECTOR)
+    .catch(() => {});
+  await delay(300);
+
+  const stillOpen = await modalPresent(page);
+  if (stillOpen) console.warn('  ⚠️  Could not close the application modal.');
+  return !stillOpen;
 }
 
 async function formSignature(modal) {
@@ -968,7 +1202,7 @@ async function openEasyApplyModal(page) {
     .catch(() => false);
   if (appliedDialog) return 'already_applied';
 
-  return (await page.$('[data-test-modal-id="easy-apply-modal"]')) ? 'opened' : 'unavailable';
+  return (await page.$(MODAL_SELECTOR)) ? 'opened' : 'unavailable';
 }
 
 async function applyWithRetry(page, jobTitle, company) {
@@ -1100,7 +1334,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
       step++;
       await wait();
 
-      const modal = await page.$('[data-test-modal-id="easy-apply-modal"]');
+      const modal = await page.$(MODAL_SELECTOR);
       if (!modal) {
         return stall('modal_missing', 'Application form closed before it could be submitted');
       }
@@ -1511,7 +1745,7 @@ async function confirmSubmission(page) {
   if (successText) return true;
 
   const modalStillOpen = await page
-    .locator('[data-test-modal-id="easy-apply-modal"]')
+    .locator(MODAL_SELECTOR)
     .isVisible()
     .catch(() => false);
   if (modalStillOpen) return false;
@@ -1629,30 +1863,58 @@ async function resolveTypeahead(modal, input, typedValue) {
   const listbox = modal.locator(
     '[role="listbox"] [role="option"], .basic-typeahead__triggered-content li'
   );
-  const count = await listbox.count().catch(() => 0);
-  if (count === 0) return;
+
+  // Poll for the suggestions rather than reading the count once. LinkedIn renders
+  // them a moment after the keystrokes land, so a single immediate check usually
+  // saw zero options and gave up — leaving the raw typed text in a field that
+  // rejects anything not picked from the list. (The README claimed this waited;
+  // it did not.)
+  let count = 0;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    count = await listbox.count().catch(() => 0);
+    if (count > 0) break;
+    await delay(300);
+  }
+  if (count === 0) return '';
 
   const needle = String(typedValue || '')
     .trim()
     .toLowerCase();
-  let target = listbox.first();
+
+  let target = null;
   if (needle) {
     for (let i = 0; i < count; i++) {
-      const text = await listbox
-        .nth(i)
-        .innerText()
-        .catch(() => '');
-      if (text.trim().toLowerCase().includes(needle)) {
+      const text = (
+        await listbox
+          .nth(i)
+          .innerText()
+          .catch(() => '')
+      )
+        .trim()
+        .toLowerCase();
+      if (!text) continue;
+      // Either direction: "Mumbai" appears inside "Mumbai, Maharashtra, India",
+      // and "Mumbai" is itself inside a typed "Mumbai (All Areas)".
+      if (text.includes(needle) || needle.includes(text)) {
         target = listbox.nth(i);
         break;
       }
     }
   }
 
+  // No suggestion resembles what we typed. Clicking the first one anyway would
+  // submit a value nobody chose — a different city, a different school. Leave the
+  // field alone; it will be reported as invalid, with the label, rather than
+  // quietly answered wrong.
+  if (!target) {
+    console.warn(`  No suggestion matched "${typedValue}" — leaving the field for review`);
+    return '';
+  }
+
   const chosen = await target.innerText().catch(() => '');
   await target.click({ force: true, timeout: 3000 }).catch(() => {});
   await delay(300);
-  return chosen.trim();
+  return cleanText(chosen);
 }
 
 async function smartFill(input, answer, label) {
@@ -1733,14 +1995,22 @@ module.exports = {
   getLinkedInJobId,
   runLinkedIn,
   fillLinkedInForm, // exported for tests: the failure classification is the core
+  closeModal,
   getInvalidFields,
   throttleMessageIn,
   pacingConfig,
   dryRunTally,
+  noteDryRunSkip,
   failureTally,
   failureBudgetExhausted,
+  effectiveRunBudget,
+  retryBudgetSpent,
   companyKey,
   companyCapReached,
+  JOB_CARD_SELECTORS,
+  MODAL_SELECTOR,
+  cleanText,
+  cleanCompany,
   noteCompanyApplication,
   resetRunState,
 };

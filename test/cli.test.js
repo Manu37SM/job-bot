@@ -50,3 +50,43 @@ test('--help is recognised', () => {
   assert.equal(parse(['--help']).help, true);
   assert.equal(parse(['-h']).help, true);
 });
+
+const { effectiveRunBudget } = require('../linkedin');
+
+test('--limit tightens the configured caps and can never raise them', () => {
+  // A flag that could raise them would let `--limit 100` blow past a deliberately
+  // small daily ceiling — the one number standing between this bot and a
+  // restriction.
+  const base = { perRun: 8, perDay: 15, lifetime: 500, doneToday: 0, alreadyDone: 291 };
+  assert.equal(effectiveRunBudget({ ...base }), 8);
+  assert.equal(effectiveRunBudget({ ...base, limit: 3 }), 3);
+  assert.equal(effectiveRunBudget({ ...base, limit: 100 }), 8, '--limit must not exceed perRun');
+  assert.equal(effectiveRunBudget({ ...base, limit: 999999 }), 8);
+});
+
+test('the daily and lifetime ceilings bind regardless of --limit', () => {
+  const base = { perRun: 8, perDay: 15, lifetime: 500, doneToday: 0, alreadyDone: 291 };
+  assert.equal(effectiveRunBudget({ ...base, doneToday: 14 }), 1);
+  assert.equal(effectiveRunBudget({ ...base, doneToday: 15 }), 0);
+  assert.equal(effectiveRunBudget({ ...base, doneToday: 14, limit: 8 }), 1, 'the day cap still wins');
+  assert.equal(effectiveRunBudget({ ...base, alreadyDone: 500 }), 0);
+});
+
+test('a nonsensical limit floors at zero rather than going negative', () => {
+  const base = { perRun: 8, perDay: 15, lifetime: 500, doneToday: 0, alreadyDone: 0 };
+  assert.equal(effectiveRunBudget({ ...base, limit: -5 }), 0);
+  assert.equal(effectiveRunBudget({ ...base, limit: 0 }), 0);
+  assert.equal(effectiveRunBudget({ ...base, doneToday: 99 }), 0, 'an over-quota day is 0, not negative');
+});
+
+test('--limit 0 means zero, not "unset"', () => {
+  // `parsed || fallback` treats 0 as absent, so `--limit 0` — a deliberate "do the
+  // whole walk but apply to nothing" — would silently become the full per-run cap.
+  assert.equal(parse(['--limit', '0']).limit, 0);
+  assert.equal(parse(['--limit=0']).limit, 0);
+  const { effectiveRunBudget } = require('../linkedin');
+  assert.equal(
+    effectiveRunBudget({ perRun: 8, perDay: 15, lifetime: 500, doneToday: 0, alreadyDone: 0, limit: 0 }),
+    0
+  );
+});

@@ -4,7 +4,7 @@ const { runNaukri } = require('./naukri');
 const { runIndeed } = require('./indeed');
 const { printSummary, printRunSummary, totalAppliedCount } = require('./logger');
 const { runPreflight } = require('./preflight');
-const { writeReviewReport } = require('./failure-report');
+const { writeReviewReport, writeDryRunReport } = require('./failure-report');
 const { installSignalHandlers, isStopRequested } = require('./shutdown');
 const { printLocationSummary } = require('./location-helper');
 const { printSalarySummary } = require('./salary-helper');
@@ -96,7 +96,12 @@ async function main() {
     console.log(`│ 🧪 Would have applied to : ${dryRunTally.eligible}`);
     console.log(`│ ⏭️  Screened out          : ${dryRunTally.skipped}`);
     console.log('│ Nothing was applied to and nothing was logged.');
-    console.log('└' + '─'.repeat(38) + '\n');
+    console.log('└' + '─'.repeat(38));
+
+    // A count answers "did it work?" but not "are these the right jobs?", which is
+    // the actual question a dry run is asked. Write the list out to be read.
+    const file = writeDryRunReport(dryRunTally);
+    if (file) console.log(`📝 The jobs it would have applied to → dry-run.md\n`);
     return;
   }
 

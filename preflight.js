@@ -187,12 +187,50 @@ function answerIssues() {
   return issues;
 }
 
+// An unrecognised level name produces an EMPTY f_E filter, which silently widens
+// the search to every seniority instead of narrowing it — the opposite of intent.
+function searchIssues() {
+  const issues = [];
+  const search = config.search || {};
+  const { LEVELS } = require('./search-filters');
+
+  if (search.experienceLevels != null) {
+    if (!Array.isArray(search.experienceLevels)) {
+      issues.push({ level: 'error', message: 'search.experienceLevels must be an array.' });
+    } else {
+      const unknown = search.experienceLevels.filter(
+        (name) => !LEVELS[String(name).toLowerCase().trim()]
+      );
+      if (unknown.length) {
+        issues.push({
+          level: 'error',
+          message: `Unknown search.experienceLevels: ${unknown.join(', ')}. Valid: ${Object.keys(LEVELS).join(', ')}.`,
+        });
+      }
+    }
+  }
+
+  const days = search.postedWithinDays;
+  if (days != null && (!Number.isFinite(Number(days)) || Number(days) < 0)) {
+    issues.push({ level: 'error', message: 'search.postedWithinDays must be a positive number or null.' });
+  }
+  if (Number(days) > 0 && Number(days) < 1) {
+    issues.push({
+      level: 'warn',
+      message: `search.postedWithinDays is ${days} — under a day is a very narrow window.`,
+    });
+  }
+
+  return issues;
+}
+
 function collectIssues() {
   return [
     ...fileIssues(),
     ...numberIssues(),
     ...pacingIssues(),
     ...answerIssues(),
+    ...searchIssues(),
     ...consistencyIssues(),
   ];
 }

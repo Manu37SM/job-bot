@@ -197,6 +197,14 @@ class FakeForm {
     this.submitted = false;
     this.closed = false;
     this.blockedClicks = 0;
+    // How this modal can be dismissed, so closeModal's escalating fallbacks can be
+    // exercised: 'button' | 'escape' | 'dom' | 'stuck'.
+    this.dismissBehaviour = 'button';
+    // Whether LinkedIn acknowledges the submission. When false the form closes but
+    // shows no confirmation — the state that must NOT be recorded as applied.
+    this.confirmsSubmission = true;
+    this.escapePresses = 0;
+    this.domRemovals = 0;
   }
 
   get current() {
@@ -346,16 +354,31 @@ function makePage(form) {
       return form.queryOne(selector);
     },
     $$: async (selector) => form.queryAll(selector),
-    evaluate: async () => false,
-    keyboard: { press: async () => {} },
-    click: async () => {},
+    evaluate: async () => {
+      // Stands in for the DOM-removal fallback of last resort.
+      form.domRemovals++;
+      if (form.dismissBehaviour === 'dom') form.closed = true;
+      return false;
+    },
+    keyboard: {
+      press: async (key) => {
+        if (key !== 'Escape') return;
+        form.escapePresses++;
+        if (form.dismissBehaviour === 'escape') form.closed = true;
+      },
+    },
+    click: async (selector) => {
+      if (form.dismissBehaviour === 'button' && /Dismiss|Discard|discard_application/.test(selector)) {
+        form.closed = true;
+      }
+    },
     // Selector-aware: only the submission-confirmation text is ever "visible".
     // A locator that reports every selector as visible makes dismissPostSubmitPopup
     // try to click a post-submit popup that isn't there.
     locator: (selector) => {
       const isConfirmation = /application \(was \)\?sent|application submitted/.test(String(selector));
       const node = {
-        isVisible: async () => isConfirmation && form.submitted,
+        isVisible: async () => isConfirmation && form.submitted && form.confirmsSubmission,
         click: async () => {},
         innerText: async () => '',
         count: async () => 0,

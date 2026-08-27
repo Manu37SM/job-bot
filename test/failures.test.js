@@ -239,3 +239,140 @@ test('a vague capability question is not sent to the skills list', () => {
     /Not a technology/
   );
 });
+
+test('the report groups open jobs by cause rather than listing 100 lines', () => {
+  const make = (id, code, title) => ({
+    jobId: id,
+    title,
+    company: 'Acme',
+    link: `https://www.linkedin.com/jobs/view/${id}`,
+    code,
+    appliedAt: '2026-08-27T10:00:00.000Z',
+    totalFailures: 1,
+    unanswered: code === 'unanswerable' ? [{ kind: 'radio', question: 'Years of Rust?' }] : undefined,
+  });
+  const report = buildReport([
+    make('1', 'timeout', 'A'),
+    make('2', 'timeout', 'B'),
+    make('3', 'unanswerable', 'C'),
+  ]);
+
+  assert.match(report, /### Question the bot has no answer for — 1 \(waiting on your answers\)/);
+  assert.match(report, /### Timed out — 2 \(retried automatically\)/);
+  // What the candidate can act on is listed before what the bot retries itself.
+  assert.ok(
+    report.indexOf('waiting on your answers)') < report.indexOf('retried automatically)'),
+    'actionable causes should come first'
+  );
+});
+
+test('the report tidies text logged before the scraper cleaned it', () => {
+  const report = buildReport([
+    {
+      jobId: '9',
+      title: 'STAFF SOFTWARE ENGINEER - FDE  ',
+      company: 'Acme Corp · Mumbai, Maharashtra, India',
+      code: 'timeout',
+      appliedAt: '2026-08-27T10:00:00.000Z',
+    },
+  ]);
+  assert.match(report, /STAFF SOFTWARE ENGINEER - FDE @ Acme Corp\]/);
+  assert.doesNotMatch(report, /Maharashtra/);
+});
+
+test('the dry-run report lists the jobs, not just a count', () => {
+  const { buildDryRunReport } = require('../failure-report');
+  // "Would have applied to 8" doesn't answer the question a dry run is asked,
+  // which is whether those are the right eight.
+  const report = buildDryRunReport({
+    jobs: [{ title: 'Backend Engineer  ', company: 'Acme · Mumbai', link: 'https://www.linkedin.com/jobs/view/1' }],
+    screened: [
+      {
+        title: 'Lead Architect',
+        company: 'Globex',
+        link: 'https://www.linkedin.com/jobs/view/2',
+        reason: 'posting asks for 12+ years, you have 4.1',
+      },
+    ],
+  });
+  assert.match(report, /Would have applied/);
+  assert.match(report, /\[Backend Engineer @ Acme\]/, 'text is tidied here too');
+  assert.match(report, /Screened out/);
+  assert.match(report, /asks for 12\+ years/, 'the reason must be shown so the rule can be loosened');
+  assert.match(report, /nothing was written to `applications\.json`/);
+});
+
+test('an empty dry run says so rather than rendering blank sections', () => {
+  const { buildDryRunReport } = require('../failure-report');
+  const report = buildDryRunReport({});
+  assert.match(report, /No jobs were reached at all/);
+  assert.doesNotMatch(report, /## Would have applied/);
+});
+
+test('a paste-ready entry never fills in the answer for you', () => {
+  const { customAnswerSnippet } = require('../failure-report');
+  // Pre-filling with the form's first option puts a specific claim in the
+  // candidate's mouth — "Male", "Yes, I work night shifts" — which is exactly what
+  // the whole answer-integrity layer exists to prevent. The options are listed
+  // alongside so the choice is easy, but it stays theirs.
+  const snippet = customAnswerSnippet({
+    question: 'What is your gender?',
+    options: ['Male', 'Female', 'I prefer not to say'],
+  });
+  assert.match(snippet, /answer: ''/, 'the answer must ship empty');
+  assert.doesNotMatch(snippet, /answer: 'Male'/);
+  assert.match(snippet, /options: Male \| Female \| I prefer not to say/);
+
+  const noOptions = customAnswerSnippet({ question: 'How many years with Python?', options: [] });
+  assert.match(noOptions, /answer: ''/);
+});
+
+test('the dry-run report groups skips by reason, decisions first', () => {
+  const { buildDryRunReport } = require('../failure-report');
+  // "Already applied" is usually most of the list and is not a decision to review.
+  // A flat list buries the handful of rows that ARE decisions.
+  const report = buildDryRunReport({
+    jobs: [{ title: 'Backend Engineer', company: 'Acme', link: 'https://l/1' }],
+    screened: [
+      { title: 'A', company: 'X', link: 'https://l/2', reason: 'already applied' },
+      { title: 'B', company: 'Y', link: 'https://l/3', reason: 'already applied' },
+      { title: 'Lead Architect', company: 'Z', link: 'https://l/4', reason: 'posting asks for 12+ years' },
+      { title: 'Night Ops', company: 'W', link: 'https://l/5', reason: 'night/rotational shift in JD' },
+    ],
+  });
+
+  assert.match(report, /### posting asks for 12\+ years — 1/);
+  assert.match(report, /### night\/rotational shift in JD — 1/);
+  assert.match(report, /### already applied — 2/);
+  assert.ok(
+    report.indexOf('posting asks for 12+ years') < report.indexOf('already applied'),
+    'reasons worth acting on must come before bookkeeping'
+  );
+  assert.match(report, /<details><summary>Show them<\/summary>/, 'bookkeeping is collapsed');
+});
+
+test('a dry run accounts for every job it looked at', () => {
+  // Only the two job-description screens used to report themselves, so a run that
+  // saw 60 postings and skipped 55 as already-applied showed 5 — which reads as
+  // "the search found almost nothing".
+  const { noteDryRunSkip, dryRunTally, resetRunState } = require('../linkedin');
+  resetRunState();
+  for (const reason of [
+    'already applied',
+    'no Easy Apply button',
+    'apply redirects off LinkedIn',
+    'per-company cap for this run',
+    'night/rotational shift in JD',
+  ]) {
+    noteDryRunSkip({ title: 'T', company: 'C', link: 'https://l/1' }, reason);
+  }
+  assert.equal(dryRunTally.skipped, 5);
+  assert.equal(dryRunTally.screened.length, 5);
+  assert.deepEqual(
+    [...new Set(dryRunTally.screened.map((j) => j.reason))].length,
+    5,
+    'each skip path must report its own reason'
+  );
+  resetRunState();
+  assert.equal(dryRunTally.skipped, 0);
+});

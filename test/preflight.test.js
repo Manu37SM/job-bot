@@ -111,3 +111,30 @@ test('a summary within a year of the config figure is not flagged', () => {
     assert.doesNotMatch(messages(), /resume summary says/);
   });
 });
+
+test('an unknown experience level is an error, not a silently empty filter', () => {
+  // An unrecognised name produces an empty f_E, which widens the search to every
+  // seniority instead of narrowing it — the opposite of what was asked for.
+  withConfig({ search: { experienceLevels: ['senior-ish'] } }, () => {
+    assert.match(messages(), /Unknown search\.experienceLevels/);
+    assert.ok(errors().length > 0);
+  });
+  withConfig({ search: { experienceLevels: 'mid-senior' } }, () => {
+    assert.match(messages(), /must be an array/);
+  });
+});
+
+test('valid search settings pass', () => {
+  withConfig({ search: { experienceLevels: ['associate', 'mid-senior'], postedWithinDays: 7 } }, () => {
+    assert.deepEqual(errors(), [], messages());
+  });
+});
+
+test('a nonsensical date window is caught', () => {
+  withConfig({ search: { postedWithinDays: -3 } }, () => {
+    assert.match(messages(), /must be a positive number or null/);
+  });
+  withConfig({ search: { postedWithinDays: 0.5 } }, () => {
+    assert.match(messages(), /very narrow window/);
+  });
+});

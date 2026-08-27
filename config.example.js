@@ -71,16 +71,43 @@ const config = {
   // Setting it makes the claim yours, not the bot's. Capped at experienceYears.
   // skillExperienceFallbackYears: 2,
 
+  // Search filters. The experience level was previously hard-coded to include
+  // Entry level for everyone, which spends a small daily budget on postings that
+  // will not reply. Left unset, it is derived from experienceYears — for 4.1 years
+  // that means Associate + Mid-Senior. Override with an explicit list if you want.
+  search: {
+    // experienceLevels: ['associate', 'mid-senior'],  // internship|entry|associate|mid-senior|director|executive
+    postedWithinDays: 7, // a six-week-old posting has usually been filled; null for no filter
+    sortByDate: true,
+  },
+
   // A run's budget counts successful applications, so without these a run could
   // grind for hours on failures and apply to nothing. A streak of failures usually
   // means something systemic rather than bad luck. 0 disables either limit.
   maxFailuresPerRun: 10,
+  // Re-attempts of previously-failed jobs, per run. A backlog of old failures
+  // appears in the same search results and would otherwise consume the whole run,
+  // leaving nothing for fresh postings. They come round again next run. 0 = no cap.
+  maxRetriedFailuresPerRun: 5,
   maxConsecutiveFailures: 5,
 
   // How long to refuse to run after LinkedIn rate-limits the account. The bot
   // stops the moment it sees the notice; this stops the NEXT run too, which is the
   // one that turns a temporary pause into a lasting restriction.
   cooldownHoursAfterThrottle: 24,
+
+  // Screens the job TITLE before the description is read. LinkedIn keyword search
+  // is loose: searching "FullStack Developer" returns .NET roles, Data Engineer
+  // roles and Junior positions. On the first real dry run five of eight matches
+  // were jobs like that. `allow` overrides every rule, `extraExcludes` adds to them.
+  titleFilters: {
+    enabled: true,
+    excludeJuniorRoles: true,
+    extraExcludes: [],
+    // Frontend-only roles are excluded by default because your stated targets are
+    // FullStack / Backend / Java. To take them, add 'frontend' here:
+    allow: [],
+  },
 
   // Skip postings that state a minimum experience well above yours — they are a
   // rejection at the first human filter, and the daily application budget is small.
