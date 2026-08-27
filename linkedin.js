@@ -1,7 +1,15 @@
 const { chromium } = require('playwright');
 const config = require('./config');
 const { answerQuestion, generateCoverLetter } = require('./resume-answers');
-const { alreadyApplied, recordApplication, totalAppliedCount } = require('./logger');
+const {
+  alreadyApplied,
+  recordApplication,
+  totalAppliedCount,
+  appliedTodayCount,
+  shouldSkipJob,
+  isTransient,
+  describeCode,
+} = require('./logger');
 const { getLocationSearchPairs } = require('./location-helper');
 const { deterministicAnswer, isNumericQuestion } = require('./answer-utils');
 const { buildNumericCandidates } = require('./field-value');
@@ -61,16 +69,28 @@ async function runLinkedIn() {
 
   const perRun = config.maxApplications.linkedin.perRun;
   const lifetime = config.maxApplications.linkedin.lifetime;
+  // A daily ceiling on top of the per-run one. Without it, several runs in an
+  // afternoon add up to a volume no human produces — which is what LinkedIn's
+  // "applying at a fast pace" safeguard is measuring.
+  const perDay = config.maxApplications.linkedin.perDay ?? 15;
   const alreadyDone = totalAppliedCount('linkedin');
-  const canApply = Math.min(perRun, lifetime - alreadyDone);
+  const doneToday = appliedTodayCount('linkedin');
+  const canApply = Math.min(perRun, perDay - doneToday, lifetime - alreadyDone);
 
   console.log(
-    `📊 LinkedIn: ${alreadyDone}/${lifetime} lifetime | applying up to ${canApply} this run`
+    `📊 LinkedIn: ${alreadyDone}/${lifetime} lifetime | ${doneToday}/${perDay} today | applying up to ${Math.max(0, canApply)} this run`
   );
-  if (canApply <= 0) {
+  if (lifetime - alreadyDone <= 0) {
     console.log('⛔ LinkedIn lifetime limit already reached. Skipping.');
     return;
   }
+  if (canApply <= 0) {
+    console.log(`⛔ Daily limit reached (${doneToday}/${perDay}). Come back tomorrow.`);
+    return;
+  }
+
+  const { min, max } = pacingConfig();
+  console.log(`🐢 Pacing: ${min}-${max}s between applications, with periodic longer breaks.`);
 
   const sessionFile = './session-linkedin.json';
   if (!require('fs').existsSync(sessionFile)) {
@@ -120,7 +140,15 @@ async function runLinkedIn() {
       `\n✅ LinkedIn Done! Applied ${appliedThisRun} this run. Total: ${alreadyDone + appliedThisRun}/${lifetime}`
     );
   } catch (err) {
-    if (err instanceof SessionExpiredError) {
+    if (err instanceof ThrottleError) {
+      console.error('\n🛑 LinkedIn has rate-limited this account.');
+      console.error(`   "${err.message}"`);
+      console.error('   Stopping the run now rather than pushing through it —');
+      console.error('   continuing is what turns a temporary pause into a restriction.');
+      console.error(
+        '   Wait at least 24h, then lower perRun / raise the pacing values in config.js.'
+      );
+    } else if (err instanceof SessionExpiredError) {
       console.error(`❌ ${err.message}`);
     } else {
       console.error('❌ LinkedIn bot error:', err.message);
@@ -155,6 +183,90 @@ async function loginToLinkedIn(page) {
 // every remaining job with the same doomed "Session expired" failure.
 class SessionExpiredError extends Error {}
 
+// LinkedIn shows an interstitial when it decides an account is applying too
+// fast ("we've briefly paused Easy Apply ..."). That is a rate limit, not a
+// broken form: every remaining job in the run would hit the same wall, and
+// hammering through it is exactly what escalates to an account restriction.
+// Treated like session expiry — abort the run cleanly and let the cooldown pass.
+class ThrottleError extends Error {}
+
+const THROTTLE_PATTERNS = [
+  /paused easy apply/i,
+  /applying at a (?:fast|rapid) pace/i,
+  /we've briefly paused/i,
+  /automated inauthentic/i,
+  /you've reached the (?:daily|weekly|monthly) (?:application|apply) limit/i,
+  /try again (?:later|tomorrow|in a )/i,
+  /unusual activity/i,
+];
+
+// Checked against the visible page rather than the whole DOM, so a hidden
+// template or an unrelated help-centre link can't produce a false positive that
+// aborts a healthy run.
+function throttleMessageIn(text) {
+  const body = String(text || '');
+  if (!body) return '';
+  const hit = THROTTLE_PATTERNS.find((pattern) => pattern.test(body));
+  if (!hit) return '';
+  const line = body
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => hit.test(l));
+  return line || 'LinkedIn has temporarily paused Easy Apply for this account';
+}
+
+async function detectThrottle(page) {
+  const text = await page
+    .evaluate(() => (document.body?.innerText || '').slice(0, 20000))
+    .catch(() => '');
+  return throttleMessageIn(text);
+}
+
+async function assertNotThrottled(page) {
+  const message = await detectThrottle(page);
+  if (message) throw new ThrottleError(message);
+}
+
+// Human-ish cadence between applications. A fixed `pauseBetweenApps` with a
+// sub-second jitter produces a near-perfectly regular request rhythm, which is
+// the single easiest automation signal to spot — and the one that triggered the
+// "applying at a fast pace" safeguard. Real applicants read the posting, pause
+// unevenly, and stop for a while every so often.
+let appsSinceBreak = 0;
+
+function pacingConfig() {
+  const pacing = config.pacing || {};
+  const legacy = Number(config.pauseBetweenApps) || 0;
+  return {
+    min: Number(pacing.minSecondsBetweenApps) || Math.max(legacy, 45),
+    max: Number(pacing.maxSecondsBetweenApps) || Math.max(legacy * 3, 150),
+    breakEvery: Number(pacing.longBreakEvery) || 6,
+    breakMin: Number(pacing.longBreakMinSeconds) || 240,
+    breakMax: Number(pacing.longBreakMaxSeconds) || 600,
+  };
+}
+
+async function humanPause() {
+  const { min, max, breakEvery, breakMin, breakMax } = pacingConfig();
+  appsSinceBreak++;
+
+  if (breakEvery > 0 && appsSinceBreak % breakEvery === 0) {
+    const seconds = Math.round(breakMin + Math.random() * Math.max(0, breakMax - breakMin));
+    console.log(
+      `  ☕ Taking a ${Math.round(seconds / 60)} min break after ${breakEvery} applications...`
+    );
+    await delay(seconds * 1000);
+    return;
+  }
+
+  // Skewed toward the low end but with a long tail, rather than a flat band —
+  // a uniform random delay is itself a recognisable pattern.
+  const spread = Math.max(0, max - min);
+  const seconds = Math.round(min + spread * Math.pow(Math.random(), 1.7));
+  console.log(`  ⏳ Waiting ${seconds}s before the next application...`);
+  await delay(seconds * 1000);
+}
+
 function isAuthWallUrl(url) {
   const u = String(url || '');
   return (
@@ -169,6 +281,7 @@ async function assertSessionAlive(page) {
   if (isAuthWallUrl(page.url())) {
     throw new SessionExpiredError('Session expired mid-run. Run: node save-session.js linkedin');
   }
+  await assertNotThrottled(page);
 }
 
 // LinkedIn's results list is virtualized/lazy-loaded — only ~8-10 cards exist in
@@ -217,9 +330,7 @@ async function goToResultsPage(page, pageNumber) {
   if (!visible) return false;
 
   await nextBtn.click({ timeout: 10000 }).catch(() => {});
-  await page
-    .waitForSelector('.job-card-container', { timeout: 10000 })
-    .catch(() => {});
+  await page.waitForSelector('.job-card-container', { timeout: 10000 }).catch(() => {});
   await wait();
   return true;
 }
@@ -359,6 +470,27 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             platform: 'LinkedIn',
             status: 'skipped',
             link: jobLink,
+            reason: 'already applied',
+          });
+          continue;
+        }
+
+        // Smart backoff. A job that has already failed for a reason re-running
+        // cannot fix (a question with no answer in config.js) is parked until
+        // those answer files actually change, and any job is retired outright
+        // after MAX_FAILED_ATTEMPTS. Without this, every run re-opens the same
+        // doomed forms, burning the per-run budget on jobs that cannot succeed.
+        const backoffReason = shouldSkipJob(jobId);
+        if (backoffReason) {
+          console.log(`⏭️  Skipping — ${backoffReason}`);
+          recordApplication({
+            jobId,
+            title: jobTitle,
+            company,
+            platform: 'LinkedIn',
+            status: 'skipped',
+            link: jobLink,
+            reason: backoffReason,
           });
           continue;
         }
@@ -403,6 +535,11 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
         await easyApplyBtn.click();
         await wait();
 
+        // The throttle interstitial replaces the application modal, so it must be
+        // caught here too — otherwise every job in the run is logged as a bogus
+        // "form never appeared" failure and burns its retry budget.
+        await assertNotThrottled(page);
+
         // LinkedIn occasionally shows a "You've already applied" confirmation
         // dialog instead of the application modal (job applied to elsewhere /
         // before this log existed). Treat it as already-applied, not a failure.
@@ -425,23 +562,9 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           continue;
         }
 
-        let success = false;
-        try {
-          // Guard the whole form fill so one stuck application can't freeze the run.
-          success = await withJobTimeout(
-            fillLinkedInForm(page, jobTitle, company),
-            `${jobTitle} @ ${company}`
-          );
-        } catch (formErr) {
-          if (formErr instanceof SessionExpiredError) throw formErr;
-          console.error(`  ⚠️  Unexpected error: ${formErr.message}`);
-          console.log('  🔄 Closing modal and moving to next job...');
-          success = false;
-        } finally {
-          await closeModal(page);
-        }
+        const result = await applyWithRetry(page, jobTitle, company);
 
-        if (success) {
+        if (result.ok) {
           recordApplication({
             jobId,
             title: jobTitle,
@@ -453,7 +576,9 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           applied++;
           console.log(`✅ Applied! (${applied}/${maxJobs})`);
         } else {
-          await saveJob(page);
+          // No LinkedIn bookmark. The failure is captured with the reason, the
+          // exact questions that went unanswered, and the fields the form
+          // rejected, so needs-review.md can tell you what to fix.
           recordApplication({
             jobId,
             title: jobTitle,
@@ -461,21 +586,21 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             platform: 'LinkedIn',
             status: 'failed',
             link: jobLink,
+            code: result.code,
+            reason: result.reason,
+            unanswered: result.unanswered,
+            blockers: result.blockers,
+            attempts: result.attempts,
           });
-          console.log('  💾 Job saved to LinkedIn → apply manually later');
           console.log('  ➡️  Moving to next job...');
         }
 
-        // Small jitter on top of the configured pause so requests don't land at a
-        // perfectly regular cadence, which is an easy automation signal.
-        const jitter = Math.floor(Math.random() * 800);
-        await delay(config.pauseBetweenApps * 1000 + jitter);
+        await humanPause();
       } catch (err) {
-        if (err instanceof SessionExpiredError) throw err;
+        if (err instanceof SessionExpiredError || err instanceof ThrottleError) throw err;
         console.error(`  ⚠️  Error on this job: ${err.message}`);
-        console.log('  🔄 Closing modal, saving job, moving to next...');
+        console.log('  🔄 Closing modal, moving to next...');
         await closeModal(page);
-        await saveJob(page);
         await delay(2000);
       }
     }
@@ -516,25 +641,6 @@ async function closeModal(page) {
   }
 }
 
-async function saveJob(page) {
-  try {
-    const btnInfo = await page.evaluate(() => {
-      const btn =
-        document.querySelector('button[aria-label^="Save"]') ||
-        document.querySelector('button.jobs-save-button') ||
-        document.querySelector('button:has-text("Save")');
-      if (!btn) return null;
-      return { alreadySaved: btn.getAttribute('aria-label')?.toLowerCase().includes('unsave') };
-    });
-
-    if (!btnInfo || btnInfo.alreadySaved) return;
-
-    await page
-      .click('button[aria-label^="Save"], button.jobs-save-button', { force: true })
-      .catch(() => {});
-    await delay(500);
-  } catch (e) {}
-}
 async function formSignature(modal) {
   // Build a compact fingerprint of the visible form state so we can detect when
   // a "Next"/"Submit" click failed to change anything (the loop is now stuck).
@@ -556,7 +662,99 @@ async function formSignature(modal) {
   }
 }
 
+// A failure is either deterministic (the bot has no answer for a question, or
+// LinkedIn rejected the value it typed) or transient (a stuck modal, a timeout,
+// a DOM race). Deterministic failures reproduce exactly, so retrying them just
+// wastes time and looks more like automation; transient ones very often clear on
+// a second, freshly-opened form. Only the latter get a retry.
+const TRANSIENT_RETRY_LIMIT = 1;
+
+async function openEasyApplyModal(page) {
+  const btn =
+    (await page.$('[data-control-name="jobdetails_topcard_inapply"]')) ||
+    (await page.$('.jobs-apply-button'));
+  if (!btn) return false;
+  await btn.click().catch(() => {});
+  await wait();
+  return Boolean(await page.$('[data-test-modal-id="easy-apply-modal"]'));
+}
+
+async function applyWithRetry(page, jobTitle, company) {
+  let result = null;
+  let attempt = 0;
+
+  while (attempt <= TRANSIENT_RETRY_LIMIT) {
+    attempt++;
+
+    if (attempt > 1) {
+      console.log(
+        `  🔁 Transient failure — retrying on a fresh form (${attempt}/${TRANSIENT_RETRY_LIMIT + 1})`
+      );
+      await delay(1500);
+      if (!(await openEasyApplyModal(page))) {
+        result = {
+          ok: false,
+          code: 'modal_missing',
+          reason: 'Easy Apply form would not reopen for a retry',
+          unanswered: result?.unanswered || [],
+          blockers: result?.blockers || [],
+        };
+        break;
+      }
+    }
+
+    try {
+      result = await withJobTimeout(
+        fillLinkedInForm(page, jobTitle, company),
+        `${jobTitle} @ ${company}`
+      );
+    } catch (formErr) {
+      if (formErr instanceof SessionExpiredError || formErr instanceof ThrottleError) throw formErr;
+      result = {
+        ok: false,
+        code: /timed out/i.test(formErr.message) ? 'timeout' : 'error',
+        reason: formErr.message,
+        unanswered: [],
+        blockers: [],
+      };
+    } finally {
+      await closeModal(page);
+    }
+
+    if (result.ok) break;
+    console.log(`  ⚠️  ${describeCode(result.code)}: ${result.reason}`);
+    if (!isTransient(result.code)) break;
+  }
+
+  return { ...result, attempts: attempt };
+}
+
 async function fillLinkedInForm(page, jobTitle, company) {
+  // Everything the bot could not answer on this form, collected as it goes.
+  // A single unanswered optional question is harmless, so it is not an instant
+  // failure — but if the form later refuses to advance, this list is exactly
+  // what the user needs to see to fix it.
+  const unanswered = [];
+  const note = (kind, question, options) => {
+    const text = String(question || '').trim();
+    if (!text) return;
+    if (unanswered.some((u) => u.question === text)) return;
+    unanswered.push({ kind, question: text, ...(options?.length ? { options } : {}) });
+  };
+  const fail = (code, reason, blockers = []) => ({ ok: false, code, reason, unanswered, blockers });
+  // When the form stalls and there are unanswered questions, the stall is almost
+  // always caused by them — report the actionable cause, not the symptom.
+  const stall = (code, reason) =>
+    unanswered.length
+      ? fail(
+          'unanswerable',
+          `No answer for: ${unanswered
+            .map((u) => u.question)
+            .slice(0, 3)
+            .join(' | ')}`
+        )
+      : fail(code, reason);
+
   try {
     let step = 0;
     const maxSteps = 12;
@@ -567,7 +765,9 @@ async function fillLinkedInForm(page, jobTitle, company) {
       await wait();
 
       const modal = await page.$('[data-test-modal-id="easy-apply-modal"]');
-      if (!modal) break;
+      if (!modal) {
+        return stall('modal_missing', 'Application form closed before it could be submitted');
+      }
 
       await handleResumeUpload(modal);
 
@@ -608,7 +808,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const value = await input.inputValue();
         if (value) continue;
 
-        const { label, inputType, hasCombobox } = await input.evaluate((el) => ({
+        const { label, inputType, hasCombobox, required } = await input.evaluate((el) => ({
           label: (
             document.querySelector(`label[for="${el.id}"]`)?.innerText ||
             el.placeholder ||
@@ -616,16 +816,27 @@ async function fillLinkedInForm(page, jobTitle, company) {
             ''
           ).trim(),
           inputType: el.type || 'text',
-          hasCombobox: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
+          hasCombobox:
+            el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
+          required: el.required || el.getAttribute('aria-required') === 'true',
         }));
 
         const answer = await mapFieldToAnswer(label, jobTitle, company, inputType, []);
-        if (!answer) continue;
+        if (!answer) {
+          // Only a required field can actually block the form, so an unanswered
+          // optional one is not worth putting in front of the user.
+          if (required) note(inputType === 'number' ? 'number' : 'text', label);
+          continue;
+        }
 
         const filled = await smartFill(input, answer, label);
         if (filled) {
           console.log(`  Filled [${inputType}] "${label}" → "${filled}"`);
           if (hasCombobox) await resolveTypeahead(modal, input, filled);
+        } else if (required) {
+          // An answer existed but no variant of it survived the field's own
+          // validation (integer-only box, rejected format, ...).
+          note(`${inputType} (value "${answer}" rejected)`, label);
         }
       }
 
@@ -654,6 +865,8 @@ async function fillLinkedInForm(page, jobTitle, company) {
           if (answer) {
             await ta.fill(answer);
             console.log(`  Filled [textarea] "${label}" → "${answer.slice(0, 60)}..."`);
+          } else {
+            note('textarea', label);
           }
         }
       }
@@ -675,6 +888,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const answer = await mapFieldToAnswer(label, jobTitle, company, 'select', options);
         if (!answer) {
           console.warn(`  No reliable dropdown answer for "${label}"`);
+          note('dropdown', label, options);
           continue;
         }
         const matchedOption =
@@ -720,6 +934,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         );
         if (!answer) {
           console.warn(`  No reliable radio answer for "${questionLabel}"`);
+          note('radio', questionLabel, optionLabels);
           continue;
         }
 
@@ -777,9 +992,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         let anySelected = false;
         for (let idx = 0; idx < optionLabels.length; idx++) {
           const optionText = optionLabels[idx];
-          const combinedQuestion = questionLabel
-            ? `${questionLabel} ${optionText}`
-            : optionText;
+          const combinedQuestion = questionLabel ? `${questionLabel} ${optionText}` : optionText;
           const shouldCheck = await mapFieldToAnswer(
             combinedQuestion,
             jobTitle,
@@ -801,11 +1014,16 @@ async function fillLinkedInForm(page, jobTitle, company) {
         // fall back to the first option rather than stalling the form.
         if (!anySelected) {
           const isRequired = await container
-            .$eval('input[type="checkbox"]', (el) => el.required || el.closest('[required]') != null)
+            .$eval(
+              'input[type="checkbox"]',
+              (el) => el.required || el.closest('[required]') != null
+            )
             .catch(() => false);
           if (isRequired && optionEls[0]) {
             await optionEls[0].click({ force: true }).catch(() => {});
-            console.log(`  Checked [checkbox] "${questionLabel}" → "${optionLabels[0]}" (fallback)`);
+            console.log(
+              `  Checked [checkbox] "${questionLabel}" → "${optionLabels[0]}" (fallback)`
+            );
           }
         }
       }
@@ -829,7 +1047,11 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const invalidFields = await getInvalidFields(modal);
         if (invalidFields.length > 0) {
           console.warn(`  Cannot continue; invalid fields: ${invalidFields.join(' | ')}`);
-          return false;
+          return fail(
+            'invalid_field',
+            `Form rejected ${invalidFields.length} field(s) before "Next"`,
+            invalidFields
+          );
         }
         const before = await formSignature(modal);
         // Re-query the button fresh (DOM may have re-rendered during filling).
@@ -840,8 +1062,7 @@ async function fillLinkedInForm(page, jobTitle, company) {
         if (before && after && before === after) {
           stuckCount++;
           if (stuckCount >= 3) {
-            console.warn('  🔁 Form not advancing after repeated Next clicks — abandoning job.');
-            return false;
+            return stall('stuck_form', 'Form would not advance after 3 "Next" clicks');
           }
         } else {
           stuckCount = 0;
@@ -856,7 +1077,11 @@ async function fillLinkedInForm(page, jobTitle, company) {
         const invalidFields = await getInvalidFields(modal);
         if (invalidFields.length > 0) {
           console.warn(`  Cannot submit; invalid fields: ${invalidFields.join(' | ')}`);
-          return false;
+          return fail(
+            'invalid_field',
+            `Form rejected ${invalidFields.length} field(s) on the final step`,
+            invalidFields
+          );
         }
         await submitBtn.click({ force: true });
         await wait();
@@ -865,22 +1090,23 @@ async function fillLinkedInForm(page, jobTitle, company) {
         await delay(2000);
         const confirmed = await confirmSubmission(page);
         if (!confirmed) {
-          console.warn('  Submit was clicked, but LinkedIn did not confirm the application.');
-          return false;
+          return fail(
+            'unconfirmed_submit',
+            'Submit was clicked but LinkedIn never showed a confirmation'
+          );
         }
         const dismissedPopup = await dismissPostSubmitPopup(page);
         if (dismissedPopup) {
           console.log('  ✅ Dismissed follow popup');
         }
-        return true;
+        return { ok: true, unanswered, blockers: [] };
       }
 
       // No Next/Submit and no Dismiss → nothing to click. If we've already filled
       // everything and the form didn't advance twice, stop spinning and bail out.
       stuckCount++;
       if (stuckCount >= 2) {
-        console.warn('  🔁 No actionable button and form is not advancing — abandoning job.');
-        return false;
+        return stall('no_action', 'No "Next" or "Submit" appeared and the form stopped changing');
       }
 
       const dismissBtn = await modal.$('button[aria-label="Dismiss"]');
@@ -892,11 +1118,13 @@ async function fillLinkedInForm(page, jobTitle, company) {
       break;
     }
 
-    return false;
+    return stall(
+      'no_action',
+      `Form never reached "Submit" (gave up after ${step}/${maxSteps} steps)`
+    );
   } catch (err) {
-    console.error('  Form fill error:', err.message);
     await closeModal(page);
-    return false;
+    return fail('error', err.message);
   }
 }
 
@@ -978,7 +1206,9 @@ async function handleResumeUpload(modal) {
       const alreadyHasFile = await fileInput.evaluate((el) => el.files && el.files.length > 0);
       if (alreadyHasFile) continue;
 
-      const accept = await fileInput.evaluate((el) => (el.getAttribute('accept') || '').toLowerCase());
+      const accept = await fileInput.evaluate((el) =>
+        (el.getAttribute('accept') || '').toLowerCase()
+      );
       // A file input with an accept list that excludes our resume's extension
       // (e.g. an image-only upload) isn't the resume field — skip it rather than
       // uploading a file the widget will reject.
@@ -998,15 +1228,22 @@ async function handleResumeUpload(modal) {
 // LinkedIn shows a suggestion listbox that must be clicked — the raw typed text
 // often fails validation on its own even though it visually matches an option.
 async function resolveTypeahead(modal, input, typedValue) {
-  const listbox = modal.locator('[role="listbox"] [role="option"], .basic-typeahead__triggered-content li');
+  const listbox = modal.locator(
+    '[role="listbox"] [role="option"], .basic-typeahead__triggered-content li'
+  );
   const count = await listbox.count().catch(() => 0);
   if (count === 0) return;
 
-  const needle = String(typedValue || '').trim().toLowerCase();
+  const needle = String(typedValue || '')
+    .trim()
+    .toLowerCase();
   let target = listbox.first();
   if (needle) {
     for (let i = 0; i < count; i++) {
-      const text = await listbox.nth(i).innerText().catch(() => '');
+      const text = await listbox
+        .nth(i)
+        .innerText()
+        .catch(() => '');
       if (text.trim().toLowerCase().includes(needle)) {
         target = listbox.nth(i);
         break;
@@ -1082,4 +1319,4 @@ async function mapFieldToAnswer(label, jobTitle, company, inputType = 'text', op
   return options[0] || '';
 }
 
-module.exports = { getLinkedInJobId, runLinkedIn };
+module.exports = { getLinkedInJobId, runLinkedIn, throttleMessageIn, pacingConfig };

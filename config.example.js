@@ -33,21 +33,31 @@ const config = {
 
   experienceYears: 3.5,
   skillExperienceYears: {
-    'Java': 3,
-    'React': 2,
-    'Node.js': 3
+    Java: 3,
+    React: 2,
+    'Node.js': 3,
   },
   jobTypes: ['permanent'],
   dayShiftOnly: true,
   maxApplications: {
-    linkedin: { perRun: 20, lifetime: 500 },
+    linkedin: { perRun: 8, perDay: 15, lifetime: 500 },
     naukri: { perRun: 20, lifetime: 500 },
     indeed: { perRun: 10, lifetime: 200 },
   },
   resumePath: './Resume.pdf',
 
   speed: 'fast', // or 'medium', 'slow'
-  pauseBetweenApps: 2, // seconds
+  // Cadence between applications, in seconds. A real applicant reads the
+  // posting, hesitates, and stops for a while every so often — a fixed 1-2s gap
+  // is the clearest automation signal there is, and what LinkedIn's "applying at
+  // a fast pace" safeguard reacts to. Raise these if you get paused again.
+  pacing: {
+    minSecondsBetweenApps: 45,
+    maxSecondsBetweenApps: 150,
+    longBreakEvery: 6,
+    longBreakMinSeconds: 240,
+    longBreakMaxSeconds: 600,
+  },
 };
 
 module.exports = config;

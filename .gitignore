@@ -29,3 +29,5 @@ session-*.json
 config.js
 resume-profile.js
 .claude/
+needs-review.md
+applications.json.tmp

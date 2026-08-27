@@ -2,6 +2,7 @@ const { runLinkedIn } = require('./linkedin');
 const { runNaukri } = require('./naukri');
 const { runIndeed } = require('./indeed');
 const { printSummary, totalAppliedCount } = require('./logger');
+const { writeReviewReport } = require('./failure-report');
 const { printLocationSummary } = require('./location-helper');
 const { printSalarySummary } = require('./salary-helper');
 const config = require('./config');
@@ -75,6 +76,11 @@ async function main() {
   }
 
   printSummary();
+
+  // Regenerate the review report last, so it reflects this run: which questions
+  // blocked the most applications, which jobs are queued for an automatic retry,
+  // and which have been retired.
+  writeReviewReport();
 }
 
 main();

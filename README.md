@@ -48,8 +48,12 @@ treated as integer-only, because browsers default them to `step=1`.
 - **Custom (non-native) invalid fields**: in addition to HTML5 `:invalid`, fields flagged with
   `aria-invalid="true"` (typeahead/combobox widgets that don't use native validation) block
   "Next"/"Submit" until resolved.
-- **Timing jitter**: a small random delay is added on top of `pauseBetweenApps` so requests don't
-  land at a perfectly regular cadence.
+- **Human-ish pacing**: the delay between applications is drawn from a skewed random range
+  (`config.pacing`, 45-150s by default) with a longer break every few applications, instead of a
+  fixed one-second gap. A perfectly regular cadence is the easiest automation signal there is.
+- **Rate-limit interstitial**: if LinkedIn puts up its "we've briefly paused Easy Apply" notice,
+  the run stops immediately instead of grinding through it — pushing past that notice is what
+  escalates a temporary pause into an account restriction.
 
 ## Setup
 
@@ -93,3 +97,55 @@ node index.js
 
 The bot opens a real browser. Do not interact with it while an application is being processed.
 Application history is stored in `applications.json`.
+
+## When an Application Fails
+
+A failed Easy Apply is **not** bookmarked on LinkedIn. Instead the bot records *why* it failed and
+what it would need to succeed, and hands you a prioritized to-do list.
+
+### Failure codes
+
+| Code | Meaning | Retried? |
+| --- | --- | --- |
+| `unanswerable` | A question had no answer in `config.js` / `resume-profile.js` | No — re-running changes nothing |
+| `invalid_field` | The bot had an answer, but the form rejected the value | No — the value needs fixing |
+| `stuck_form` | The form stopped advancing past a step | Yes |
+| `no_action` | No "Next"/"Submit" ever appeared | Yes |
+| `modal_missing` | The application modal vanished mid-fill | Yes |
+| `unconfirmed_submit` | Submit was clicked, no confirmation followed | Yes |
+| `timeout` | The job exceeded the per-job wall-clock guard | Yes |
+| `error` | An unexpected exception | Yes |
+
+### What happens on failure
+
+1. **One automatic retry**, but only for transient codes. A deterministic failure reproduces
+   exactly, so retrying it just wastes time and adds automation signal.
+2. **A diagnostic log entry** in `applications.json` — the code, a one-line reason, the exact text
+   of every question that went unanswered (with the options the form offered), and any validation
+   messages the form produced.
+3. **Smart backoff on later runs.** A job whose last failure was deterministic is parked until
+   `config.js` or `resume-profile.js` actually changes — tracked with a fingerprint of those files,
+   so simply re-running the bot does not re-open a form that cannot succeed. Any job is retired
+   after 3 failures.
+4. **`needs-review.md`**, regenerated at the end of every run: the questions that blocked the most
+   applications, ranked, each with a pointer to the config key that would answer it — plus the
+   values the form rejected and the full list of open jobs with links.
+
+Answering the top one or two rows in `needs-review.md` typically unblocks the whole backlog on the
+next run, since the same questions repeat across postings.
+
+## Staying Under LinkedIn's Radar
+
+LinkedIn actively detects and pauses fast, regular application activity, and the terms of service
+prohibit automated tools — an account that keeps tripping the safeguard can be restricted. This
+project can only reduce the volume signal; it makes no attempt to disguise itself as a human, and
+you use it at your own risk.
+
+The levers, in order of how much they matter:
+
+- `config.maxApplications.linkedin.perDay` (default 15) and `perRun` (default 8) — the total volume.
+- `config.pacing` — the gaps between applications and the periodic longer breaks.
+- `config.speed` — `'slow'` or `'medium'` slows the interaction inside each form as well.
+
+If you see the "applying at a fast pace" notice, stop for at least 24 hours before running again,
+and lower `perDay` when you resume. The bot will halt on its own if it sees that notice mid-run.
