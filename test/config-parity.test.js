@@ -97,7 +97,10 @@ test('the README quotes at least a few real defaults', () => {
   assert.ok(found.length >= 3, `only matched: ${found.join(', ')}`);
 });
 
-test('every mutation-test anchor still applies to the code', () => {
+// Skipped inside a mutation run: a mutant removes its own anchor by definition, so
+// this test would fail for every one of them and report a kill that proves nothing
+// about the behaviour the mutant was meant to break.
+test('every mutation-test anchor still applies to the code', { skip: Boolean(process.env.JOB_BOT_MUTATION_RUN) }, () => {
   // A mutant whose anchor text has moved silently stops testing whatever it was
   // there to test, and `npm run mutation` keeps reporting a perfect score. Cheap to
   // check here; a full mutation run is one test suite per mutant.
@@ -118,7 +121,7 @@ test('the mutation suite covers every module that makes a decision', () => {
     'question-policy.js', 'answer-utils.js', 'resume-logic.js', 'field-value.js',
     'linkedin.js', 'logger.js', 'job-fit.js', 'search-filters.js',
     'failure-report.js', 'preflight.js', 'cooldown.js', 'cli.js', 'shutdown.js',
-    'title-fit.js',
+    'title-fit.js', 'search-plan.js',
   ];
   const uncovered = decisionModules.filter((m) => !covered.has(m));
   assert.deepEqual(uncovered, [], `no mutant probes: ${uncovered.join(', ')}`);

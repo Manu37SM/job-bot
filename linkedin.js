@@ -8,20 +8,21 @@ const {
   appliedTodayCount,
   shouldSkipJob,
   failuresFor,
+  companyLifetimeCapReached,
   isTransient,
   describeCode,
 } = require('./logger');
-const { getLocationSearchPairs } = require('./location-helper');
 const { deterministicAnswer, isNumericQuestion } = require('./answer-utils');
 const { buildNumericCandidates } = require('./field-value');
 const { isStopRequested, requestStop } = require('./shutdown');
 const policy = require('./question-policy');
 const { assessFit } = require('./job-fit');
 const { assessTitle } = require('./title-fit');
+const { planSearches, advanceSearchOffset, buildCombinations } = require('./search-plan');
 const { buildSearchUrl, describeFilters } = require('./search-filters');
 const { options } = require('./cli');
 const { recordThrottle, activeHold } = require('./cooldown');
-const { cleanText, cleanCompany } = require('./text-utils');
+const { cleanText, cleanCompany, companyKey } = require('./text-utils');
 
 // Counters for a dry run, where nothing is recorded to the log.
 const dryRunTally = { eligible: 0, skipped: 0, jobs: [], screened: [] };
@@ -96,17 +97,6 @@ function resetRunState() {
   cardsSeenThisRun = 0;
   workingCardSelector = null;
   appsSinceBreak = 0;
-}
-
-function companyKey(company) {
-  return String(company || '')
-    .toLowerCase()
-    .replace(
-      /\b(pvt|private|ltd|limited|llp|inc|corp|corporation|technologies|technology|solutions|services|india)\b/g,
-      ''
-    )
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
 }
 
 // A recruiter seeing five applications from one person inside an hour reads it as
@@ -200,6 +190,59 @@ const COMPANY_SELECTORS = [
   '.jobs-unified-top-card__company-name',
   '.job-details-jobs-unified-top-card__primary-description-container a',
 ];
+
+// LinkedIn puts the job id on the card itself. Reading it there means a job we
+// already know about never has to be opened at all — and the log says that matters:
+// one posting was re-encountered 493 times across the run history, and 216 known
+// jobs accounted for 2,904 sightings. Each of those was a click and a page wait
+// spent to reach a decision the log could already have made.
+async function readCardIdentity(card) {
+  return card
+    .evaluate((el) => {
+      const id =
+        el.getAttribute('data-job-id') ||
+        el.getAttribute('data-occludable-job-id') ||
+        el.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
+        (el.querySelector('a[href*="/jobs/view/"]')?.getAttribute('href') || '').match(
+          /\/jobs\/view\/(\d+)/
+        )?.[1] ||
+        '';
+      const titleNode = el.querySelector(
+        '.job-card-list__title, .job-card-container__link, a[href*="/jobs/view/"]'
+      );
+      const companyNode = el.querySelector(
+        '.job-card-container__primary-description, .artdeco-entity-lockup__subtitle, .job-card-container__company-name'
+      );
+      return {
+        jobId: String(id || '').trim(),
+        title: (titleNode?.innerText || '').trim(),
+        company: (companyNode?.innerText || '').trim(),
+      };
+    })
+    .catch(() => ({ jobId: '', title: '', company: '' }));
+}
+
+// Whether a job can be dismissed from its results card alone, without opening it.
+// Extracted from the loop so it is testable: everything it needs is the card's
+// identity plus the log, and none of it needs a browser.
+//
+// Returns { action: 'open' } or { action: 'skip', reason, log }. `log` is false for
+// a job already handled earlier in the same run — that is bookkeeping, not a new
+// fact about the job.
+function cardDecision({ jobId, title } = {}) {
+  if (!jobId) return { action: 'open' };
+  if (seenThisRun.has(jobId))
+    return { action: 'skip', reason: 'seen earlier this run', log: false };
+  if (alreadyApplied(jobId)) return { action: 'skip', reason: 'already applied', log: true };
+
+  const backoff = shouldSkipJob(jobId);
+  if (backoff) return { action: 'skip', reason: backoff, log: true };
+
+  const fit = assessTitle(title || '');
+  if (fit.skip) return { action: 'skip', reason: fit.reason, log: true };
+
+  return { action: 'open' };
+}
 
 function getLinkedInJobId(url) {
   const value = String(url || '');
@@ -323,25 +366,33 @@ async function runLinkedIn() {
     const runBudget = options.dryRun ? (options.limit ?? Math.max(perRun, 5)) : canApply;
     resetRunState();
     let appliedThisRun = 0;
-    const locationPairs = getLocationSearchPairs();
 
-    for (const position of config.positions) {
+    // Every (position, location) combination, starting where the last run left
+    // off. A run still stops when its budget is spent — rotating means the next
+    // one begins somewhere new instead of re-running the same first search.
+    const plan = planSearches('linkedin');
+    let searchesPerformed = 0;
+
+    for (const { position, location, workModes } of plan) {
       if (appliedThisRun >= runBudget || isStopRequested()) break;
 
-      for (const { location, workModes } of locationPairs) {
-        if (appliedThisRun >= runBudget || isStopRequested()) break;
-
-        console.log(`\n🔍 Searching: "${position}" in "${location}" [${workModes.join(',')}]`);
-        const count = await searchAndApply(
-          page,
-          position,
-          location,
-          workModes,
-          runBudget - appliedThisRun
-        );
-        appliedThisRun += count;
-      }
+      console.log(`\n🔍 Searching: "${position}" in "${location}" [${workModes.join(',')}]`);
+      searchesPerformed++;
+      const count = await searchAndApply(
+        page,
+        position,
+        location,
+        workModes,
+        runBudget - appliedThisRun
+      );
+      appliedThisRun += count;
     }
+
+    // Only advance past searches actually visited, so nothing is skipped over.
+    advanceSearchOffset('linkedin', searchesPerformed);
+    console.log(
+      `\n🔁 Covered ${searchesPerformed}/${buildCombinations().length} search combinations; the next run starts after them.`
+    );
 
     if (cardsSeenThisRun === 0) {
       // Every search returned nothing. That is almost never "no jobs" — it is the
@@ -730,6 +781,38 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
           .catch(() => false);
         if (alreadyMarkedApplied) continue;
 
+        // Decide from the card where possible. Opening a job costs a click, a
+        // navigation and a detail-panel wait; these checks need none of it.
+        const fromCard = await readCardIdentity(card);
+        const decision = cardDecision(fromCard);
+        if (decision.action === 'skip') {
+          seenThisRun.add(fromCard.jobId);
+          const cardTitle = cleanText(fromCard.title) || 'Unknown Role';
+          const cardCompany = cleanCompany(fromCard.company) || 'Unknown Company';
+          const cardLink = `https://www.linkedin.com/jobs/view/${fromCard.jobId}`;
+
+          if (decision.log) {
+            console.log(`⏭️  Skipping without opening — ${decision.reason}`);
+            if (options.dryRun) {
+              noteDryRunSkip(
+                { title: cardTitle, company: cardCompany, link: cardLink },
+                decision.reason
+              );
+            } else {
+              recordApplication({
+                jobId: fromCard.jobId,
+                title: cardTitle,
+                company: cardCompany,
+                platform: 'LinkedIn',
+                status: 'skipped',
+                link: cardLink,
+                reason: decision.reason,
+              });
+            }
+          }
+          continue;
+        }
+
         await card.scrollIntoViewIfNeeded().catch(() => {});
         await card.click({ timeout: 10000 });
         // Wait for the job details panel (not a fixed sleep) so we read the right
@@ -908,6 +991,17 @@ async function searchAndApply(page, position, location, workModes, maxJobs) {
             link: jobLink,
             reason: fit.reason,
           });
+          continue;
+        }
+
+        // Lifetime cap first — a company that has had enough applications has had
+        // enough regardless of what this particular run has done.
+        const lifetimeCap = companyLifetimeCapReached(company, 'LinkedIn');
+        if (lifetimeCap) {
+          console.log(`⏭️  Skipping — ${lifetimeCap}`);
+          if (options.dryRun) {
+            noteDryRunSkip({ title: jobTitle, company, link: jobLink }, lifetimeCap);
+          }
           continue;
         }
 
@@ -2011,6 +2105,9 @@ module.exports = {
   MODAL_SELECTOR,
   cleanText,
   cleanCompany,
+  readCardIdentity,
+  cardDecision,
+  seenThisRun,
   noteCompanyApplication,
   resetRunState,
 };

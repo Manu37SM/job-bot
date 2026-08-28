@@ -1,6 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { companyKey } = require('./text-utils');
+
+// Lazily required: config.js is user-edited and tests mutate it in place, so read
+// it at call time rather than capturing a snapshot at module load.
+const config = () => require('./config');
 
 // Overridable so tests can run against a scratch file instead of the real history.
 const LOG_FILE = process.env.JOB_BOT_LOG
@@ -196,6 +201,31 @@ function shouldSkipJob(jobId) {
   }
 
   return null;
+}
+
+// How many applications have EVER gone to one employer. The per-run cap stops a
+// burst; this stops the slow accumulation. In the real log, 27 applications had
+// gone to a single job-aggregator account and 13 to one recruitment consultancy —
+// 18% of every application ever sent, to four companies.
+function companyApplicationCount(company, platform) {
+  const key = companyKey(company);
+  if (!key) return 0;
+  return loadLog().filter(
+    (e) =>
+      e &&
+      e.status === 'applied' &&
+      (!platform || e.platform?.toLowerCase() === platform.toLowerCase()) &&
+      companyKey(e.company) === key
+  ).length;
+}
+
+// Returns a reason string when this employer has had enough, or null.
+function companyLifetimeCapReached(company, platform) {
+  const cap = Number(config().maxApplicationsPerCompanyTotal);
+  if (!Number.isFinite(cap) || cap <= 0) return null;
+  const count = companyApplicationCount(company, platform);
+  if (count < cap) return null;
+  return `already applied to this company ${count}× in total`;
 }
 
 function appliedTodayCount(platform) {
@@ -472,6 +502,8 @@ module.exports = {
   alreadyApplied,
   appliedTodayCount,
   totalAppliedCount,
+  companyApplicationCount,
+  companyLifetimeCapReached,
   recordApplication,
   printSummary,
   printRunSummary,

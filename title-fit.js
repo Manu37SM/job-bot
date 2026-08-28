@@ -49,6 +49,24 @@ const STACK_MARKERS = [
   'rust',
   'elixir',
   'delphi',
+  // Enterprise platforms that define a role the way a language does. "Progress
+  // Developer II" was attempted 12 times in the log; Progress/OpenEdge is nowhere
+  // on the CV. Phrases rather than bare words, because "progress" and "dynamics"
+  // are ordinary English.
+  'progress developer',
+  'openedge',
+  'mulesoft',
+  'informatica',
+  'talend',
+  'tibco',
+  'siebel',
+  'peoplesoft',
+  'dynamics 365',
+  'guidewire',
+  'duck creek',
+  'oracle apps',
+  'oracle ebs',
+  'oracle integration cloud',
 ];
 
 // Disciplines that are not this candidate's job, however senior.
@@ -69,7 +87,25 @@ const ROLE_EXCLUDES = [
   'devops',
   'site reliability',
   'sre',
+  // Security and network engineering. Added after a second real dry run put
+  // "Security Engineer" and "SASE Solutions Engineer" in the apply list — both
+  // security/network roles for a backend API developer.
   'network engineer',
+  'security engineer',
+  'cyber security',
+  'cybersecurity',
+  'infosec',
+  'soc analyst',
+  'sase',
+  // Pre-sales: customer-facing roles that happen to carry the word "engineer".
+  'solutions engineer',
+  'solution engineer',
+  'sales engineer',
+  'presales',
+  'pre-sales',
+  'system administrator',
+  'database administrator',
+  'dba',
   'security analyst',
   'penetration test',
   'business analyst',
@@ -89,12 +125,33 @@ const ROLE_EXCLUDES = [
   'react native developer',
   'embedded',
   'firmware',
-  // Frontend-only. The CV has React and Angular, but the stated target roles are
-  // FullStack / Backend / Java. Remove this line if you want frontend roles.
-  'frontend developer',
-  'front end developer',
-  'front-end developer',
-  'frontend engineer',
+];
+
+// Frontend is NOT excluded by default. The CV lists React, Angular, Next.js, HTML
+// and CSS, and 8 of the 291 real applications in the log were frontend roles — so
+// excluding them would override the candidate's own revealed preference on
+// ambiguous evidence. To opt out, add to `titleFilters.extraExcludes`:
+//   'frontend developer', 'front end developer', 'front-end developer', 'frontend engineer'
+
+// The role is the head of a title; what follows is usually the DOMAIN. "Full Stack
+// Engineer, Machine Learning Tooling" is a full-stack job at an ML company, not an
+// ML job — blocking it on the words "machine learning" threw away a real match.
+const CORE_ROLE_MARKERS = [
+  'full stack',
+  'fullstack',
+  'full-stack',
+  'backend',
+  'back end',
+  'back-end',
+  'java developer',
+  'java engineer',
+  'node',
+  'api developer',
+  'api engineer',
+  'spring boot',
+  'software developer',
+  'software engineer',
+  'application developer',
 ];
 
 // Levels below this candidate. Only applied once they have real experience.
@@ -151,9 +208,15 @@ function assessTitle(title, { experienceYears = config.experienceYears } = {}) {
     return { skip: true, reason: `title names ${marker}, which is not on your CV` };
   }
 
-  for (const role of roles) {
-    if (titleMentions(text, role)) {
-      return { skip: true, reason: `${role} is a different discipline` };
+  // Stack markers above are absolute: ".NET Full Stack Developer" is a .NET job
+  // however it is worded. Discipline exclusions are not — they lose to an explicit
+  // core role, because that names the job while the discipline names the domain.
+  const namesCoreRole = CORE_ROLE_MARKERS.some((marker) => titleMentions(text, marker));
+  if (!namesCoreRole) {
+    for (const role of roles) {
+      if (titleMentions(text, role)) {
+        return { skip: true, reason: `${role} is a different discipline` };
+      }
     }
   }
 
@@ -168,4 +231,11 @@ function assessTitle(title, { experienceYears = config.experienceYears } = {}) {
   return { skip: false };
 }
 
-module.exports = { assessTitle, titleMentions, STACK_MARKERS, ROLE_EXCLUDES, SENIORITY_EXCLUDES };
+module.exports = {
+  assessTitle,
+  titleMentions,
+  STACK_MARKERS,
+  ROLE_EXCLUDES,
+  SENIORITY_EXCLUDES,
+  CORE_ROLE_MARKERS,
+};

@@ -14,7 +14,9 @@ test('the real dry-run titles are sorted correctly', () => {
     ['Back End Developer', false],
     ['Sr. Software Engineer (.NET Full stack Developer)', true],
     ['Senior Full Stack Developer ( REMOTE- India)', false],
-    ['Senior Frontend Developer | Discovery & Ticketing Platform', true],
+    // Frontend is kept by default: the CV lists React, Angular and Next.js, and 8
+    // of the 291 real applications in the log were frontend roles.
+    ['Senior Frontend Developer | Discovery & Ticketing Platform', false],
     ['Senior Data Engineer - AWS', true],
     ['Senior Java Developer _ Exp: 6+ Years _ Hybrid Model', false],
   ];
@@ -64,12 +66,61 @@ test('junior filtering only applies once you have experience', () => {
 test('allow overrides every rule', () => {
   const original = config.titleFilters;
   try {
-    config.titleFilters = { enabled: true, allow: ['frontend'] };
-    assert.equal(skip('Senior Frontend Developer'), false, 'allow must win');
+    config.titleFilters = { enabled: true, extraExcludes: ['data engineer'], allow: ['data engineer'] };
+    assert.equal(skip('Senior Data Engineer - AWS'), false, 'allow must beat an exclusion');
     config.titleFilters = { enabled: true, allow: [] };
-    assert.equal(skip('Senior Frontend Developer'), true);
+    assert.equal(skip('Senior Data Engineer - AWS'), true);
   } finally {
     config.titleFilters = original;
+  }
+});
+
+test('frontend roles are kept unless you opt out', () => {
+  // The CV lists React, Angular, Next.js, HTML and CSS, and 8 of the 291 real
+  // applications were frontend roles. Excluding them by default would override the
+  // candidate's own revealed preference on ambiguous evidence.
+  const original = config.titleFilters;
+  try {
+    config.titleFilters = { enabled: true };
+    for (const title of ['Frontend Developer', 'Senior Frontend Engineer', 'Front-End Developer']) {
+      assert.equal(skip(title), false, title);
+    }
+    config.titleFilters = { enabled: true, extraExcludes: ['frontend developer', 'frontend engineer'] };
+    assert.equal(skip('Frontend Developer'), true, 'opting out must work');
+  } finally {
+    config.titleFilters = original;
+  }
+});
+
+test('a core role in the title beats a discipline in the domain', () => {
+  // "Full Stack Engineer, Machine Learning Tooling" is a full-stack job at an ML
+  // company. Blocking it on the words "machine learning" threw away a real match:
+  // the role is the head of the title, the discipline is the domain after it.
+  for (const title of [
+    'Full Stack Engineer, Machine Learning Tooling',
+    'Backend Engineer, Security Team',
+    'Software Engineer - Data Platform',
+    'Senior Full Stack AI Engineer',
+  ]) {
+    assert.equal(skip(title), false, title);
+  }
+  // With no core role in the title, the discipline still decides.
+  for (const title of ['AI Test Engineer', 'Senior Data Engineer - AWS', 'Security Engineer']) {
+    assert.equal(skip(title), true, title);
+  }
+});
+
+test('a stack marker is absolute — a core role does not rescue it', () => {
+  // ".NET Full Stack Developer" is a .NET job however it is worded. These are all
+  // real titles this candidate actually applied to.
+  for (const title of [
+    'Frontend-Focused Full Stack Developer - Angular / .NET',
+    'Senior Backend Engineer - Golang',
+    'Senior C# Back-End Developer',
+    'ServiceNow Full Stack Developer',
+    'Senior Software Engineer – Full Stack (.NET/React)',
+  ]) {
+    assert.equal(skip(title), true, title);
   }
 });
 
@@ -98,4 +149,69 @@ test('an empty or missing title never causes a skip', () => {
   assert.equal(skip(''), false);
   assert.equal(skip(null), false);
   assert.equal(skip('   '), false);
+});
+
+test('the second real dry-run batch is sorted correctly', () => {
+  // A second live run put "Security Engineer" and "SASE Solutions Engineer" in the
+  // apply list — both security/network roles for a backend API developer.
+  const observed = [
+    ['Software Engineer', false],
+    ['Security Engineer', true],
+    ['Senior Software Engineer', false],
+    ['Senior Node.js Developer', false],
+    ['Core Java Developer (Oracle Database)', false],
+    ['Web Developer', false],
+    ['Technical Leader (Fullstack Backend focused)', false],
+    ['SASE Solutions Engineer', true],
+    ['Senior Ruby on Rails Developer (IoT Integrations)', true],
+    ['PowerBuilder Developer', true],
+    ['AI/ML Engineer', true],
+  ];
+  for (const [title, expected] of observed) {
+    assert.equal(skip(title), expected, title);
+  }
+});
+
+test('a backend role in a security domain is still your job', () => {
+  // The exclusions must name the ROLE, not merely mention the word. Plenty of
+  // backend work is in security, banking or networking domains.
+  for (const title of [
+    'Backend Engineer, Security Team',
+    'Java Developer - Banking Security Domain',
+    'Solutions Architect - Java',
+    'Senior Engineer, Network Services Platform',
+  ]) {
+    assert.equal(skip(title), false, title);
+  }
+});
+
+test('pre-sales roles that carry the word "engineer" are excluded', () => {
+  for (const title of ['Solutions Engineer', 'Sales Engineer', 'Pre-Sales Engineer']) {
+    assert.equal(skip(title), true, title);
+  }
+});
+
+test('enterprise platforms are treated like languages', () => {
+  // "Progress Developer II" was attempted 12 times in the real log, and
+  // Progress/OpenEdge is nowhere on the CV.
+  for (const title of [
+    'Progress Developer II',
+    'MuleSoft Integration Developer',
+    'Senior Informatica Developer',
+    'Software Engineer : Oracle Integration Cloud(OIC) Consultant',
+  ]) {
+    assert.equal(skip(title), true, title);
+  }
+});
+
+test('platform names are matched as phrases, not as English words', () => {
+  // "progress" and "dynamics" are ordinary words; excluding them outright would
+  // throw away real jobs.
+  for (const title of [
+    'Java Developer - Progress tracking platform',
+    'Backend Engineer, Dynamics Team',
+    'Full Stack Developer, Growth & Progress',
+  ]) {
+    assert.equal(skip(title), false, title);
+  }
 });

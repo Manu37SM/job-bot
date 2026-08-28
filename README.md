@@ -106,10 +106,50 @@ Three commands that need no browser and spend no applications.
 
 ```powershell
 npm run preflight        # validate config.js before anything opens
+npm run stats            # what your application history actually says
 npm run audit            # what would the bot answer, given your current config?
 npm run audit -- --log   # what has it actually said under your name?
 node answers-audit.js "Are you willing to work weekends?" "Yes,No"
 ```
+
+`npm run stats` reads `applications.json` and reports what a run never tells you:
+applications per day against your cap, the real gaps between them, the success rate
+of each run over time, which employers are absorbing a disproportionate share, jobs
+being retried into the ground, which seniority bands actually convert, how many past
+applications the title screen would now reject, and which words appear in the titles
+you land on but are missing from `config.positions`.
+
+It also reports **how many distinct employers** each run's failures came from, which
+separates the two kinds of trouble that look identical in a failure count: a few jobs
+stuck in a retry loop concentrate on a handful of employers, while a markup change or
+a degraded account fails broadly across many. Across the 25 August step change that
+number went from **14 employers to 42**, with only one company in common.
+
+It flags a **step change in the success rate**, which is the earliest sign that
+something has broken — LinkedIn's markup moved, a config edit backfired, or the
+account is being throttled. In the log this was written against, the rate fell from
+**81% to 54%** between 21 and 25 August. Three explanations were tested against the
+data and all three were wrong: it was not the code change on the 25th (the run
+predates it), not degradation within a run, and not the backlog of already-failing
+jobs (85-100% of those failures were jobs never seen before). The cause is simply
+unknowable, because **not one of the 308 failure records says why it failed**. That
+is the single best argument for the diagnostics: the same question next time has an
+answer waiting.
+
+Once failures carry codes, `npm run stats` groups them into causes with different
+owners and names the most likely one:
+
+| Codes | Cause | Whose problem |
+| --- | --- | --- |
+| `modal_missing`, `no_action` | LinkedIn markup changed | selectors need updating |
+| `unconfirmed_submit` | LinkedIn rejecting submissions | slow down before it becomes a pause |
+| `unanswerable`, `invalid_field` | your answers are incomplete | one config line each, listed in `needs-review.md` |
+| `stuck_form`, `timeout`, `error` | form or timing trouble | usually transient |
+
+That is the difference between "308 failures" and a to-do list, and it is what the
+25 August question needs: one run, and the answer is in the output. Every improvement in the last few rounds came out of
+running this analysis by hand — 27 applications to one job aggregator, a busiest day
+of 33, and search keywords that matched a quarter of the titles they returned.
 
 `npm run preflight` also runs automatically at the start of every run, and a hard
 error stops it before a single application is spent. It catches a missing resume
@@ -194,6 +234,25 @@ recorded from this version onward; earlier applications have none.
   results as fresh postings and is reached first, so without this a run spends its
   whole budget on known-bad jobs and applies to nothing new. They come round again
   next run.
+- **Rotating search coverage** (`search-plan.js`): the loop used to be
+  `for each position { for each location { … } }`, exiting as soon as the run's
+  budget was spent. With 7 keywords, 11 location pairs and a budget of 8, that meant
+  **77 possible searches of which only the first ever ran** — every "Java Developer"
+  search and every Bangalore/Pune search had effectively never executed, and the log
+  shows the resulting narrow slice of applications. The combinations are now
+  interleaved so consecutive searches vary the *role* rather than nudging the city,
+  and the starting point rotates between runs (persisted in `.bot-state.json`), so a
+  different slice is reached each time and the whole space is covered over a few runs.
+- **Both spellings of every role**: across the 291 applications in the log, "Engineer"
+  appears in 176 of the on-target titles and "Developer" in only 94 — while every
+  search keyword said Developer. `config.positions` now searches both.
+- **Deciding from the card**: the job id, title and company are read off the results
+  card before it is clicked, so a job that is already applied to, parked by backoff,
+  or plainly the wrong role is skipped without opening it at all. The log makes the
+  case: one posting was re-encountered **493 times**, and 216 known jobs accounted
+  for **2,904 sightings** — every one of them a click, a navigation and a
+  detail-panel wait spent to reach a decision the log could already have made. When
+  the card carries no id, the old path still runs.
 - **Overlapping searches**: "FullStack Developer" and "Backend Developer" in Mumbai
   return many of the same postings. Each job is opened and screened once per run, not
   once per search term.
@@ -209,8 +268,19 @@ recorded from this version onward; earlier applications have none.
   stack, discipline, or level — never for failing to match something, because
   "Software Engineer" names nothing and is a perfectly good title. Stack markers are
   checked against your CV rather than hard-coded, so the list stays right as the CV
-  changes. Frontend-only roles are excluded by default given your stated targets; add
-  `'frontend'` to `titleFilters.allow` to take them.
+  changes.
+
+  Two rules keep it from over-reaching. **A core role in the title beats a
+  discipline in the domain** — "Full Stack Engineer, Machine Learning Tooling" is a
+  full-stack job at an ML company, so it is kept, while a bare "AI Test Engineer" is
+  not. **A stack marker is absolute** — ".NET Full Stack Developer" is a .NET job
+  however it is worded.
+
+  Calibrated against the 291 applications already in your log: it blocks **7%** of
+  them, and every one is a genuine mismatch (Junior Java, .NET, Golang, C#, Pega,
+  ServiceNow, a Data Engineer role). Frontend roles are **kept** by default — your CV
+  lists React, Angular and Next.js, and 8 of those 291 applications were frontend.
+  Opt out with `titleFilters.extraExcludes`.
 - **Experience-fit screen**: a posting that states a minimum well above your
   experience ("10+ years") is skipped before the form opens, because it's a rejection
   at the first human filter and the daily budget is small. It reads the *lowest*
@@ -218,8 +288,19 @@ recorded from this version onward; earlier applications have none.
   million users" is ignored), and applies `fit.experienceToleranceYears` on top. Set
   `fit.skipOverqualifiedPostings: false` to apply to everything.
 - **Human-ish pacing**: the delay between applications is drawn from a skewed random range
-  (`config.pacing`, 45-150s by default) with a longer break every few applications, instead of a
-  fixed one-second gap. A perfectly regular cadence is the easiest automation signal there is.
+  (`config.pacing`, 45-150s by default) with a longer break every few applications.
+
+  A correction, from measuring the real log rather than assuming: the old
+  `pauseBetweenApps: 1` was **not** the problem. Actual gaps between consecutive
+  applications had a median of **79s** (p25 54s, p90 319s, fastest 30s, none under
+  10s) — the one-second pause was negligible next to the time each form takes to
+  fill, and the cadence was already irregular. **Volume was the signal**: 33
+  applications in a single day, then 28, 27, 24, 24. `perDay` is the lever that
+  matters here; the pacing values mostly formalise what was already happening.
+- **Per-company lifetime cap**: `maxApplicationsPerCompanyTotal` (5). The per-run cap
+  stops a burst; this stops slow accumulation. In the log, **27** applications had
+  gone to a single job-aggregator account and 13 to one recruitment consultancy —
+  18% of every application ever sent, to four companies, none of it in one run.
 - **Rate-limit interstitial**: if LinkedIn puts up its "we've briefly paused Easy Apply" notice,
   the run stops immediately instead of grinding through it — pushing past that notice is what
   escalates a temporary pause into an account restriction.
@@ -339,7 +420,9 @@ what it would need to succeed, and hands you a prioritized to-do list.
 2. **A diagnostic log entry** in `applications.json` — the code, a one-line reason, the exact text
    of every question that went unanswered (with the options the form offered), and any validation
    messages the form produced.
-3. **Smart backoff on later runs.** A job whose last failure was deterministic is parked until
+3. **Smart backoff on later runs.** In the log this was written against, **114
+   distinct jobs produced 308 failure records** — 42% of every failure was a repeat
+   attempt at a job that had already failed, one of them **24 times**. A job whose last failure was deterministic is parked until
    `config.js` or `resume-profile.js` actually changes — tracked with a fingerprint of those files,
    so simply re-running the bot does not re-open a form that cannot succeed. After 3 failures a
    job is set aside, and gets one more chance after 14 days: LinkedIn changes its markup and this
@@ -392,7 +475,10 @@ Lower `perDay` and raise the `pacing` values before you resume.
 | `job-fit.js` | Reads the stated minimum experience out of a job description |
 | `title-fit.js` | Screens the job title: wrong stack, wrong discipline, wrong level |
 | `search-filters.js` | Builds the LinkedIn search URL: level, work mode, recency |
-| `text-utils.js` | Tidies scraped titles and company names |
+| `search-plan.js` | Which searches a run performs, and rotates them between runs |
+| `text-utils.js` | Tidies scraped titles and company names; company identity |
+| `stats.js` | Reads the log back: volume, concentration, fit, keyword coverage |
+| `mutants.js` | 52 deliberate bugs, applied to a copy, to test the tests |
 | `question-policy.js` | **Answer integrity** — what may and may not be guessed |
 | `answer-utils.js` | Deterministic answers from `config.js`; option matching |
 | `resume-profile.js` | Your CV as data — 50 lines, no logic |
@@ -444,8 +530,15 @@ the refusal guard on radio fallbacks, the invalid-field check on multi-step form
 a bug would have logged jobs as applied that LinkedIn had rejected, permanently.
 
 Mutations never touch the real files, so an interrupted run cannot leave the repo
-broken. A test in the suite checks that all 36 anchors still apply, so a refactor
-cannot silently disable one.
+broken. A test in the suite checks that every anchor still applies, so a refactor
+cannot silently disable one — and that test is **skipped inside a mutation run**,
+because a mutant necessarily removes its own anchor and would otherwise fail it,
+reporting a kill for every mutant regardless of whether any behaviour changed.
+
+That bug was real: the harness reported a perfect score for several rounds while
+two mutants in the card-decision path were surviving unnoticed. If you add a mutant
+and it is killed, confirm the failing test is one that describes the behaviour —
+not the anchor check.
 
 ## Tests
 

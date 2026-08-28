@@ -9,7 +9,8 @@
     "review": "node -e \"require('./failure-report').writeReviewReport()\"",
     "audit": "node answers-audit.js",
     "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\"",
-    "mutation": "node mutants.js"
+    "mutation": "node mutants.js",
+    "stats": "node stats.js"
   },
   "keywords": [],
   "author": "",

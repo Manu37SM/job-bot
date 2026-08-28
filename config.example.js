@@ -22,7 +22,15 @@ const config = {
 
   noticePeriod: '30 days',
   lastWorkingDay: '2026-07-01',
-  positions: ['Software Engineer', 'Backend Developer', 'Node.js Developer'],
+  // Search keywords. Try both "Developer" and "Engineer" spellings — job titles
+  // use them interchangeably and searching only one halves your reach.
+  positions: [
+    'FullStack Developer',
+    'Full Stack Engineer',
+    'Backend Developer',
+    'Backend Engineer',
+    'Software Engineer',
+  ],
 
   locations: {
     preferredCities: ['Mumbai', 'Navi Mumbai', 'Thane'],
@@ -59,6 +67,12 @@ const config = {
     includeSalary: false,
     includeNotice: true,
   },
+
+  // Most applications to any one employer, ever. The per-run cap below stops a
+  // burst; this stops slow accumulation. In the real log 27 applications had gone
+  // to a single job-aggregator account and 13 to one recruitment consultancy — 18%
+  // of every application sent, to four companies. 0 disables it.
+  maxApplicationsPerCompanyTotal: 5,
 
   // Most applications to any one company in a single run. Five applications from
   // one person to one company inside an hour reads as spray-and-pray, and the

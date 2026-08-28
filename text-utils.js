@@ -19,4 +19,18 @@ function cleanCompany(text) {
   );
 }
 
-module.exports = { cleanText, cleanCompany };
+// Normalised company identity. LinkedIn renders the same employer half a dozen
+// ways ("Acme Pvt Ltd", "Acme Private Limited", "Acme"), and a per-company cap that
+// treats those as different companies is no cap at all.
+function companyKey(company) {
+  return String(company || '')
+    .toLowerCase()
+    .replace(
+      /\b(pvt|private|ltd|limited|llp|inc|corp|corporation|technologies|technology|solutions|services|india)\b/g,
+      ''
+    )
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+module.exports = { cleanText, cleanCompany, companyKey };

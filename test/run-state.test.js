@@ -204,3 +204,44 @@ test('resetRunState clears the retry tally too', () => {
   resetRunState();
   assert.equal(failureTally.retries, 0);
 });
+
+const os = require('os');
+const fsx = require('fs');
+const pathx = require('path');
+
+test('a lifetime cap stops slow accumulation at one employer', () => {
+  // The per-run cap stops a burst. In the real log, 27 applications had gone to a
+  // single job-aggregator account and 13 to one recruitment consultancy — 18% of
+  // every application ever sent, to four companies, none of it in one run.
+  const scratch = pathx.join(os.tmpdir(), `job-bot-lifetime-${process.pid}.json`);
+  const previous = process.env.JOB_BOT_LOG;
+  process.env.JOB_BOT_LOG = scratch;
+  delete require.cache[require.resolve('../logger')];
+  const logger = require('../logger');
+  const original = config.maxApplicationsPerCompanyTotal;
+
+  try {
+    config.maxApplicationsPerCompanyTotal = 3;
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      jobId: String(i),
+      company: i === 0 ? 'Acme Pvt Ltd' : 'Acme Private Limited', // same employer
+      platform: 'LinkedIn',
+      status: 'applied',
+      appliedAt: new Date().toISOString(),
+    }));
+    fsx.writeFileSync(scratch, JSON.stringify(rows));
+
+    assert.equal(logger.companyApplicationCount('Acme', 'LinkedIn'), 3, 'spellings share a counter');
+    assert.match(logger.companyLifetimeCapReached('Acme', 'LinkedIn'), /3× in total/);
+    assert.equal(logger.companyLifetimeCapReached('Globex', 'LinkedIn'), null);
+
+    config.maxApplicationsPerCompanyTotal = 0;
+    assert.equal(logger.companyLifetimeCapReached('Acme', 'LinkedIn'), null, '0 disables the cap');
+  } finally {
+    config.maxApplicationsPerCompanyTotal = original;
+    if (previous === undefined) delete process.env.JOB_BOT_LOG;
+    else process.env.JOB_BOT_LOG = previous;
+    delete require.cache[require.resolve('../logger')];
+    if (fsx.existsSync(scratch)) fsx.unlinkSync(scratch);
+  }
+});
