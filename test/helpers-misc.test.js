@@ -21,8 +21,6 @@ test('CTC totals add fixed and variable without float drift', () => {
     assert.equal(current.total(), 4.7);
     assert.equal(current.fixed(), 3.7);
     assert.equal(current.variable(), 1);
-    // 3.7 + 1 in binary floating point is 4.7000000000000005 without rounding,
-    // and that figure is typed into a salary field a recruiter reads.
     assert.equal(String(current.total()), '4.7');
   });
 });
@@ -52,27 +50,36 @@ test('missing or junk CTC values read as zero rather than NaN', () => {
 });
 
 test('search pairs cover every configured city with the right modes', () => {
-  withConfig({
-    locations: {
-      preferredCities: ['Mumbai', 'Thane'],
-      preferredCityModes: ['onsite', 'hybrid', 'remote'],
-      otherCities: ['Bangalore'],
-      otherCityModes: ['remote'],
+  withConfig(
+    {
+      locations: {
+        preferredCities: ['Mumbai', 'Thane'],
+        preferredCityModes: ['onsite', 'hybrid', 'remote'],
+        otherCities: ['Bangalore'],
+        otherCityModes: ['remote'],
+      },
     },
-  }, () => {
-    const pairs = getLocationSearchPairs();
-    assert.equal(pairs.length, 3);
-    assert.deepEqual(pairs.find((p) => p.location === 'Mumbai').workModes, ['onsite', 'hybrid', 'remote']);
-    // The whole point of otherCities: those are remote-only, and applying to them
-    // onsite would contradict the stated preference.
-    assert.deepEqual(pairs.find((p) => p.location === 'Bangalore').workModes, ['remote']);
-  });
+    () => {
+      const pairs = getLocationSearchPairs();
+      assert.equal(pairs.length, 3);
+      assert.deepEqual(pairs.find((p) => p.location === 'Mumbai').workModes, [
+        'onsite',
+        'hybrid',
+        'remote',
+      ]);
+      assert.deepEqual(pairs.find((p) => p.location === 'Bangalore').workModes, ['remote']);
+    }
+  );
 });
 
 test('missing mode lists fall back to sane defaults', () => {
   withConfig({ locations: { preferredCities: ['Pune'], otherCities: ['Delhi'] } }, () => {
     const pairs = getLocationSearchPairs();
-    assert.deepEqual(pairs.find((p) => p.location === 'Pune').workModes, ['onsite', 'hybrid', 'remote']);
+    assert.deepEqual(pairs.find((p) => p.location === 'Pune').workModes, [
+      'onsite',
+      'hybrid',
+      'remote',
+    ]);
     assert.deepEqual(pairs.find((p) => p.location === 'Delhi').workModes, ['remote']);
   });
 });

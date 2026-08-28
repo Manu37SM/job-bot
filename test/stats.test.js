@@ -52,8 +52,6 @@ test('an empty log says so rather than dividing by zero', () => {
 });
 
 test('concentration surfaces an employer taking a large share', () => {
-  // The finding this tool exists for: 27 applications had gone to one job
-  // aggregator, and nothing in the run output ever said so.
   const rows = [
     ...Array.from({ length: 9 }, () => applied({ company: 'Jobgether' })),
     applied({ company: 'Globex' }),
@@ -105,13 +103,15 @@ test('keywords missing from your search config are flagged', () => {
 
 test('malformed rows do not crash the report', () => {
   assert.doesNotThrow(() =>
-    run([applied(), { status: 'applied' }, { status: 'applied', title: null, company: null, appliedAt: 'nonsense' }])
+    run([
+      applied(),
+      { status: 'applied' },
+      { status: 'applied', title: null, company: null, appliedAt: 'nonsense' },
+    ])
   );
 });
 
 test('repeated failures on one job are surfaced', () => {
-  // Before the backoff existed, a failing job was retried on every run forever.
-  // One posting in the real log was attempted 24 times, and nothing ever said so.
   const rows = [
     applied(),
     ...Array.from({ length: 9 }, () => ({
@@ -134,29 +134,42 @@ test('repeated failures on one job are surfaced', () => {
 test('seniority bands that never convert are flagged', () => {
   const out = run([
     applied({ title: 'Senior Java Developer' }),
-    { jobId: 'a', title: 'Java Technical Architect', company: 'X', platform: 'LinkedIn', status: 'failed', appliedAt: '2026-08-20T10:00:00.000Z' },
+    {
+      jobId: 'a',
+      title: 'Java Technical Architect',
+      company: 'X',
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: '2026-08-20T10:00:00.000Z',
+    },
   ]);
   assert.match(out, /Seniority bands/);
   assert.match(out, /architect.*never converts/s);
 });
 
 test('a step change in the success rate is flagged', () => {
-  // The earliest sign that something broke — LinkedIn's markup moved, a config
-  // edit backfired, the account is being throttled. In the real log the rate fell
-  // from ~81% to ~54% between 21 and 25 August and nothing ever said so.
   const day = (date, applied, failing) => [
     ...Array.from({ length: applied }, (_, i) => ({
-      jobId: `${date}-a${i}`, title: 'Backend Engineer', company: 'Acme',
-      platform: 'LinkedIn', status: 'applied', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}-a${i}`,
+      title: 'Backend Engineer',
+      company: 'Acme',
+      platform: 'LinkedIn',
+      status: 'applied',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
     ...Array.from({ length: failing }, (_, i) => ({
-      jobId: `${date}-f${i}`, title: 'Backend Engineer', company: 'Acme',
-      platform: 'LinkedIn', status: 'failed', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}-f${i}`,
+      title: 'Backend Engineer',
+      company: 'Acme',
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
   ];
 
-  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']
-    .flatMap((d) => day(d, 18, 2));
+  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'].flatMap(
+    (d) => day(d, 18, 2)
+  );
   const broken = ['2026-08-10', '2026-08-11', '2026-08-12'].flatMap((d) => day(d, 8, 12));
 
   const out = run([...healthy, ...broken]);
@@ -165,49 +178,89 @@ test('a step change in the success rate is flagged', () => {
 });
 
 test('a steady success rate is not flagged as a regression', () => {
-  const day = (date) => Array.from({ length: 20 }, (_, i) => ({
-    jobId: `${date}-${i}`, title: 'Backend Engineer', company: 'Acme', platform: 'LinkedIn',
-    status: i < 16 ? 'applied' : 'failed', appliedAt: `${date}T10:00:00.000Z`,
-  }));
-  const out = run(['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07', '2026-08-08'].flatMap(day));
+  const day = (date) =>
+    Array.from({ length: 20 }, (_, i) => ({
+      jobId: `${date}-${i}`,
+      title: 'Backend Engineer',
+      company: 'Acme',
+      platform: 'LinkedIn',
+      status: i < 16 ? 'applied' : 'failed',
+      appliedAt: `${date}T10:00:00.000Z`,
+    }));
+  const out = run(
+    [
+      '2026-08-01',
+      '2026-08-02',
+      '2026-08-03',
+      '2026-08-04',
+      '2026-08-05',
+      '2026-08-06',
+      '2026-08-07',
+      '2026-08-08',
+    ].flatMap(day)
+  );
   assert.match(out, /Success rate per run/);
   assert.doesNotMatch(out, /point drop/);
 });
 
 test('the flag says the cause is unreadable when no failure has a code', () => {
   const day = (date, applied, failing) => [
-    ...Array.from({ length: applied }, (_, i) => ({ jobId: `${date}a${i}`, title: 'T', company: 'C', platform: 'LinkedIn', status: 'applied', appliedAt: `${date}T10:00:00.000Z` })),
-    ...Array.from({ length: failing }, (_, i) => ({ jobId: `${date}f${i}`, title: 'T', company: 'C', platform: 'LinkedIn', status: 'failed', appliedAt: `${date}T10:00:00.000Z` })),
+    ...Array.from({ length: applied }, (_, i) => ({
+      jobId: `${date}a${i}`,
+      title: 'T',
+      company: 'C',
+      platform: 'LinkedIn',
+      status: 'applied',
+      appliedAt: `${date}T10:00:00.000Z`,
+    })),
+    ...Array.from({ length: failing }, (_, i) => ({
+      jobId: `${date}f${i}`,
+      title: 'T',
+      company: 'C',
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: `${date}T10:00:00.000Z`,
+    })),
   ];
   const out = run([
-    ...['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'].flatMap((d) => day(d, 18, 2)),
+    ...['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'].flatMap((d) =>
+      day(d, 18, 2)
+    ),
     ...['2026-08-10', '2026-08-11', '2026-08-12'].flatMap((d) => day(d, 8, 12)),
   ]);
   assert.match(out, /cannot be read/);
 });
 
 test('broad failure across many employers is distinguished from a few stuck jobs', () => {
-  // The two look identical in a failure count and mean opposite things: a retry
-  // loop concentrates on a handful of employers, a markup change fails broadly.
-  // In the real log that number went 14 -> 42 across the step change, with only
-  // one company in common.
   const day = (date, applied, failures) => [
     ...Array.from({ length: applied }, (_, i) => ({
-      jobId: `${date}a${i}`, title: 'Backend Engineer', company: 'Acme',
-      platform: 'LinkedIn', status: 'applied', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}a${i}`,
+      title: 'Backend Engineer',
+      company: 'Acme',
+      platform: 'LinkedIn',
+      status: 'applied',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
     ...failures.map((company, i) => ({
-      jobId: `${date}f${i}`, title: 'Backend Engineer', company,
-      platform: 'LinkedIn', status: 'failed', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}f${i}`,
+      title: 'Backend Engineer',
+      company,
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
   ];
 
-  // Healthy runs: few failures, all at one employer (a stuck job).
-  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']
-    .flatMap((d) => day(d, 18, ['Stuck Co', 'Stuck Co']));
-  // Broken runs: many failures, each at a different employer.
-  const broken = ['2026-08-10', '2026-08-11', '2026-08-12']
-    .flatMap((d) => day(d, 8, Array.from({ length: 12 }, (_, i) => `Company ${i}`)));
+  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'].flatMap(
+    (d) => day(d, 18, ['Stuck Co', 'Stuck Co'])
+  );
+  const broken = ['2026-08-10', '2026-08-11', '2026-08-12'].flatMap((d) =>
+    day(
+      d,
+      8,
+      Array.from({ length: 12 }, (_, i) => `Company ${i}`)
+    )
+  );
 
   const out = run([...healthy, ...broken]);
   assert.match(out, /point drop/);
@@ -218,19 +271,37 @@ test('broad failure across many employers is distinguished from a few stuck jobs
 test('a concentrated collapse is named as a retry loop, not a markup change', () => {
   const day = (date, applied, failures) => [
     ...Array.from({ length: applied }, (_, i) => ({
-      jobId: `${date}a${i}`, title: 'T', company: `Co ${i}`, platform: 'LinkedIn',
-      status: 'applied', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}a${i}`,
+      title: 'T',
+      company: `Co ${i}`,
+      platform: 'LinkedIn',
+      status: 'applied',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
     ...failures.map((company, i) => ({
-      jobId: `${date}f${i}`, title: 'T', company, platform: 'LinkedIn',
-      status: 'failed', appliedAt: `${date}T10:00:00.000Z`,
+      jobId: `${date}f${i}`,
+      title: 'T',
+      company,
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: `${date}T10:00:00.000Z`,
     })),
   ];
-  // Healthy: failures spread widely. Broken: all failures at one employer.
-  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']
-    .flatMap((d) => day(d, 18, Array.from({ length: 4 }, (_, i) => `Spread ${i}`)));
-  const broken = ['2026-08-10', '2026-08-11', '2026-08-12']
-    .flatMap((d) => day(d, 6, Array.from({ length: 14 }, () => 'One Stuck Co')));
+  const healthy = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'].flatMap(
+    (d) =>
+      day(
+        d,
+        18,
+        Array.from({ length: 4 }, (_, i) => `Spread ${i}`)
+      )
+  );
+  const broken = ['2026-08-10', '2026-08-11', '2026-08-12'].flatMap((d) =>
+    day(
+      d,
+      6,
+      Array.from({ length: 14 }, () => 'One Stuck Co')
+    )
+  );
 
   const out = run([...healthy, ...broken]);
   assert.match(out, /stuck in a retry loop/);
@@ -238,13 +309,14 @@ test('a concentrated collapse is named as a retry loop, not a markup change', ()
 });
 
 test('failure codes are grouped into causes with different owners', () => {
-  // "308 failures" is a number. "Your forms changed" and "you need to answer three
-  // questions" are different problems with different owners, and the codes can
-  // tell them apart — which is exactly what the 25 August step change needed and
-  // could not have, because none of those failures carried a code.
   const fail = (code, i) => ({
-    jobId: `f${code}${i}`, title: 'T', company: `Co${i}`, platform: 'LinkedIn',
-    status: 'failed', code, appliedAt: '2026-08-28T10:00:00.000Z',
+    jobId: `f${code}${i}`,
+    title: 'T',
+    company: `Co${i}`,
+    platform: 'LinkedIn',
+    status: 'failed',
+    code,
+    appliedAt: '2026-08-28T10:00:00.000Z',
   });
 
   const markup = run([
@@ -276,17 +348,38 @@ test('failure codes are grouped into causes with different owners', () => {
 test('uncoded failures are excluded and the exclusion is stated', () => {
   const out = run([
     applied(),
-    { jobId: 'old', title: 'T', company: 'C', platform: 'LinkedIn', status: 'failed', appliedAt: '2026-08-01T10:00:00.000Z' },
-    { jobId: 'new', title: 'T', company: 'C', platform: 'LinkedIn', status: 'failed', code: 'timeout', appliedAt: '2026-08-28T10:00:00.000Z' },
+    {
+      jobId: 'old',
+      title: 'T',
+      company: 'C',
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: '2026-08-01T10:00:00.000Z',
+    },
+    {
+      jobId: 'new',
+      title: 'T',
+      company: 'C',
+      platform: 'LinkedIn',
+      status: 'failed',
+      code: 'timeout',
+      appliedAt: '2026-08-28T10:00:00.000Z',
+    },
   ]);
   assert.match(out, /1 older failures carry no code/);
 });
 
 test('a log with no coded failures omits the section entirely', () => {
-  // Rather than printing an empty or misleading breakdown.
   const out = run([
     applied(),
-    { jobId: 'x', title: 'T', company: 'C', platform: 'LinkedIn', status: 'failed', appliedAt: '2026-08-01T10:00:00.000Z' },
+    {
+      jobId: 'x',
+      title: 'T',
+      company: 'C',
+      platform: 'LinkedIn',
+      status: 'failed',
+      appliedAt: '2026-08-01T10:00:00.000Z',
+    },
   ]);
   assert.doesNotMatch(out, /What the failures say/);
 });

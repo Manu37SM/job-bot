@@ -1,6 +1,3 @@
-// Answers Easy Apply questions entirely from local data: config.js facts + the CV
-// text/structured profile in resume-profile.js. No AI provider, no network call, no
-// API key. This intentionally replaces the old ai.js, which called out to Anthropic.
 const config = require('./config');
 const { current, expected } = require('./salary-helper');
 const {
@@ -24,16 +21,9 @@ const NEGATIVE_WORDS =
 
 const SPONSOR_WORDS = /sponsor|visa/i;
 
-// Last-resort answer for a question with a fixed set of options (radio/select/
-// checkbox). Easy Apply will not let the form advance if a required field is left
-// blank, so — unlike the old AI fallback — this never returns '' when options exist.
 function bestGuessFromOptions(question, options) {
   const q = String(question || '').toLowerCase();
 
-  // Nothing is guessed for protected characteristics, eligibility, legal history,
-  // or skill claims. Leaving the field blank stalls the form — and that stall is
-  // reported as an `unanswerable` failure naming this exact question, so it can be
-  // answered once in config.customAnswers instead of being silently invented here.
   if (!policy.mayGuess(question)) return '';
 
   if (NEGATIVE_WORDS.test(q) || SPONSOR_WORDS.test(q)) {
@@ -46,7 +36,6 @@ function bestGuessFromOptions(question, options) {
   ) {
     return findOption(options, /\byes\b/i) || options[0] || '';
   }
-  // Ambiguous but harmless: pick something so the form can advance.
   return options[0] || '';
 }
 
@@ -63,10 +52,6 @@ function buildTextareaAnswer(question, jobTitle, company) {
   return profile.summary;
 }
 
-// Cover letters used to end with "My current CTC is X, my expectation is Y" —
-// volunteering a salary anchor in free text, before any conversation, to every
-// company. The structured salary fields on the form are still filled; this is about
-// not repeating the number where it isn't asked for. Both parts are configurable.
 function coverLetter(jobTitle, company) {
   const role = jobTitle ? ` for the ${jobTitle} role` : '';
   const at = company ? ` at ${company}` : '';
@@ -91,31 +76,20 @@ function answerQuestion(question, jobTitle = '', company = '', inputType = 'text
   console.log(`\n📄 Filling from CV/config [${inputType}]: "${question}"`);
   if (options.length) console.log(`   Options: ${options.join(' | ')}`);
 
-  // 0. Anything the candidate has answered by hand in config.customAnswers wins
-  //    outright — this is the loop that needs-review.md closes.
   let answer = policy.customAnswer(question, options);
   if (answer) console.log('   ↳ matched a config.customAnswers entry');
 
-  // 1. Deterministic facts from config.js (salary, notice period, experience, etc.)
   if (!answer) answer = deterministicAnswer(question, inputType, options);
 
-  // 2. Facts sourced from the CV (skills, certifications, education, employers).
   if (!answer) answer = profile.answerFromResume(question, inputType, options);
 
-  // 3. Textarea prompts (cover letter, "about yourself", open-ended) built from the
-  //    resume summary — never sent to an external model.
   if (!answer && inputType === 'textarea')
     answer = buildTextareaAnswer(question, jobTitle, company);
 
-  // 4. Conservative heuristic fallback (yes/no phrasing, generic patterns).
   if (!answer) answer = localFallback(question, inputType, options);
 
-  // 5. Never leave a field with fixed options blank — that stalls Easy Apply.
   if (!answer && options.length > 0) answer = bestGuessFromOptions(question, options);
 
-  // Resolve against the option list. Numeric answers skip matchOption's loose
-  // substring matching (e.g. "0" is a substring of "30 days" — that would silently
-  // match the wrong option) and go straight to exact/numeric-range matching.
   const isNumericAnswer = /^-?\d+(?:\.\d+)?$/.test(String(answer).trim());
   let normalized = answer;
   if (options.length) {

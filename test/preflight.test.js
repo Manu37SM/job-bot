@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { collectIssues } = require('../preflight');
 const config = require('../config');
 
-// The config module is a singleton, so each case mutates and restores one key.
 function withConfig(patch, fn) {
   const saved = {};
   for (const key of Object.keys(patch)) saved[key] = config[key];
@@ -16,7 +15,10 @@ function withConfig(patch, fn) {
   }
 }
 
-const messages = () => collectIssues().map((i) => `${i.level}: ${i.message}`).join('\n');
+const messages = () =>
+  collectIssues()
+    .map((i) => `${i.level}: ${i.message}`)
+    .join('\n');
 const errors = () => collectIssues().filter((i) => i.level === 'error');
 
 test('the shipped config passes with no errors', () => {
@@ -31,9 +33,12 @@ test('a missing resume is an error, not a silent skip', () => {
 });
 
 test('an expected CTC below the current one is flagged', () => {
-  withConfig({ currentCTC: { fixed: 10, variable: 0 }, expectedCTC: { fixed: 5, variable: 0 } }, () => {
-    assert.match(messages(), /below currentCTC/);
-  });
+  withConfig(
+    { currentCTC: { fixed: 10, variable: 0 }, expectedCTC: { fixed: 5, variable: 0 } },
+    () => {
+      assert.match(messages(), /below currentCTC/);
+    }
+  );
 });
 
 test('a skill claiming more years than the total career is flagged', () => {
@@ -97,8 +102,6 @@ test('empty positions or locations are errors', () => {
 });
 
 test('a resume summary contradicting config.experienceYears is flagged', () => {
-  // The cover letter prints the summary and the config figure in the same
-  // paragraph, so a mismatch is visible to every recruiter who reads it.
   withConfig({ experienceYears: 9 }, () => {
     assert.match(messages(), /resume summary says .* but config\.experienceYears is 9/);
   });
@@ -113,8 +116,6 @@ test('a summary within a year of the config figure is not flagged', () => {
 });
 
 test('an unknown experience level is an error, not a silently empty filter', () => {
-  // An unrecognised name produces an empty f_E, which widens the search to every
-  // seniority instead of narrowing it — the opposite of what was asked for.
   withConfig({ search: { experienceLevels: ['senior-ish'] } }, () => {
     assert.match(messages(), /Unknown search\.experienceLevels/);
     assert.ok(errors().length > 0);
@@ -125,9 +126,12 @@ test('an unknown experience level is an error, not a silently empty filter', () 
 });
 
 test('valid search settings pass', () => {
-  withConfig({ search: { experienceLevels: ['associate', 'mid-senior'], postedWithinDays: 7 } }, () => {
-    assert.deepEqual(errors(), [], messages());
-  });
+  withConfig(
+    { search: { experienceLevels: ['associate', 'mid-senior'], postedWithinDays: 7 } },
+    () => {
+      assert.deepEqual(errors(), [], messages());
+    }
+  );
 });
 
 test('a nonsensical date window is caught', () => {

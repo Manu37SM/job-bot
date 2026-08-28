@@ -22,7 +22,7 @@ test('a rate limit puts the next run on hold', () => {
   const now = Date.parse('2026-08-27T10:00:00.000Z');
   cooldown.recordThrottle('linkedin', "We've briefly paused Easy Apply", now);
 
-  const hold = cooldown.activeHold('linkedin', now + 3600000); // one hour later
+  const hold = cooldown.activeHold('linkedin', now + 3600000);
   assert.ok(hold, 'the hold must survive the process that recorded it');
   assert.equal(hold.hoursLeft, 23);
   assert.match(hold.message, /briefly paused/);

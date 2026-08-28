@@ -12,15 +12,11 @@ const {
 } = require('../failure-report');
 
 test('deterministic failures are not retried, transient ones are', () => {
-  // The whole point of the split: re-running a form the bot has no answer for
-  // produces the identical failure, so it must not be retried.
   assert.equal(isTransient('unanswerable'), false);
   assert.equal(isTransient('invalid_field'), false);
   assert.equal(isTransient('stuck_form'), true);
   assert.equal(isTransient('timeout'), true);
   assert.equal(isTransient('unconfirmed_submit'), true);
-  // An unrecognised code is assumed transient — better to retry once than to
-  // permanently park a job over a code someone forgot to register.
   assert.equal(isTransient('something_new'), true);
 });
 
@@ -185,8 +181,6 @@ test('entries from before diagnostics existed are labelled honestly', () => {
 });
 
 test('a job description that says "try again later" does not abort the run', () => {
-  // The page text scanned for throttling includes the job description, so ordinary
-  // English in a posting must not read as LinkedIn's rate-limit notice.
   const jd = [
     'Senior Backend Engineer',
     'We review every application. If you do not hear from us, try again later.',
@@ -201,14 +195,22 @@ test('the real interstitial is caught wherever it appears', () => {
     "We noticed you're applying at a fast pace. To ensure genuine applications get the attention they deserve, we've briefly paused Easy Apply as a safeguard against automated inauthentic activities.";
   assert.match(throttleMessageIn(notice), /applying at a fast pace/);
   assert.match(throttleMessageIn('', notice), /applying at a fast pace/);
-  assert.match(throttleMessageIn('Jobs', 'You have reached the daily application limit'), /daily application limit/);
+  assert.match(
+    throttleMessageIn('Jobs', 'You have reached the daily application limit'),
+    /daily application limit/
+  );
 });
 
 test('ambiguous wording counts only inside an alert or dialog', () => {
-  // "Try again later" in a posting is noise; in a LinkedIn alert it is a throttle.
   assert.equal(throttleMessageIn('Please try again later if the page fails to load.'), '');
-  assert.match(throttleMessageIn('', 'Something went wrong. Please try again later.'), /try again later/i);
-  assert.match(throttleMessageIn('', 'We detected unusual activity on your account'), /unusual activity/i);
+  assert.match(
+    throttleMessageIn('', 'Something went wrong. Please try again later.'),
+    /try again later/i
+  );
+  assert.match(
+    throttleMessageIn('', 'We detected unusual activity on your account'),
+    /unusual activity/i
+  );
 });
 
 test('every fix suggestion points at the file that actually holds the answer', () => {
@@ -232,8 +234,6 @@ test('every fix suggestion points at the file that actually holds the answer', (
 });
 
 test('a vague capability question is not sent to the skills list', () => {
-  // "Experience in fast-paced environments" is not something to add to `skills`,
-  // and saying so sends the reader on a pointless errand.
   assert.match(
     suggestFix({ question: 'Do you have experience working in fast-paced environments?' }),
     /Not a technology/
@@ -249,7 +249,8 @@ test('the report groups open jobs by cause rather than listing 100 lines', () =>
     code,
     appliedAt: '2026-08-27T10:00:00.000Z',
     totalFailures: 1,
-    unanswered: code === 'unanswerable' ? [{ kind: 'radio', question: 'Years of Rust?' }] : undefined,
+    unanswered:
+      code === 'unanswerable' ? [{ kind: 'radio', question: 'Years of Rust?' }] : undefined,
   });
   const report = buildReport([
     make('1', 'timeout', 'A'),
@@ -259,7 +260,6 @@ test('the report groups open jobs by cause rather than listing 100 lines', () =>
 
   assert.match(report, /### Question the bot has no answer for — 1 \(waiting on your answers\)/);
   assert.match(report, /### Timed out — 2 \(retried automatically\)/);
-  // What the candidate can act on is listed before what the bot retries itself.
   assert.ok(
     report.indexOf('waiting on your answers)') < report.indexOf('retried automatically)'),
     'actionable causes should come first'
@@ -282,10 +282,14 @@ test('the report tidies text logged before the scraper cleaned it', () => {
 
 test('the dry-run report lists the jobs, not just a count', () => {
   const { buildDryRunReport } = require('../failure-report');
-  // "Would have applied to 8" doesn't answer the question a dry run is asked,
-  // which is whether those are the right eight.
   const report = buildDryRunReport({
-    jobs: [{ title: 'Backend Engineer  ', company: 'Acme · Mumbai', link: 'https://www.linkedin.com/jobs/view/1' }],
+    jobs: [
+      {
+        title: 'Backend Engineer  ',
+        company: 'Acme · Mumbai',
+        link: 'https://www.linkedin.com/jobs/view/1',
+      },
+    ],
     screened: [
       {
         title: 'Lead Architect',
@@ -298,7 +302,11 @@ test('the dry-run report lists the jobs, not just a count', () => {
   assert.match(report, /Would have applied/);
   assert.match(report, /\[Backend Engineer @ Acme\]/, 'text is tidied here too');
   assert.match(report, /Screened out/);
-  assert.match(report, /asks for 12\+ years/, 'the reason must be shown so the rule can be loosened');
+  assert.match(
+    report,
+    /asks for 12\+ years/,
+    'the reason must be shown so the rule can be loosened'
+  );
   assert.match(report, /nothing was written to `applications\.json`/);
 });
 
@@ -311,10 +319,6 @@ test('an empty dry run says so rather than rendering blank sections', () => {
 
 test('a paste-ready entry never fills in the answer for you', () => {
   const { customAnswerSnippet } = require('../failure-report');
-  // Pre-filling with the form's first option puts a specific claim in the
-  // candidate's mouth — "Male", "Yes, I work night shifts" — which is exactly what
-  // the whole answer-integrity layer exists to prevent. The options are listed
-  // alongside so the choice is easy, but it stays theirs.
   const snippet = customAnswerSnippet({
     question: 'What is your gender?',
     options: ['Male', 'Female', 'I prefer not to say'],
@@ -329,15 +333,23 @@ test('a paste-ready entry never fills in the answer for you', () => {
 
 test('the dry-run report groups skips by reason, decisions first', () => {
   const { buildDryRunReport } = require('../failure-report');
-  // "Already applied" is usually most of the list and is not a decision to review.
-  // A flat list buries the handful of rows that ARE decisions.
   const report = buildDryRunReport({
     jobs: [{ title: 'Backend Engineer', company: 'Acme', link: 'https://l/1' }],
     screened: [
       { title: 'A', company: 'X', link: 'https://l/2', reason: 'already applied' },
       { title: 'B', company: 'Y', link: 'https://l/3', reason: 'already applied' },
-      { title: 'Lead Architect', company: 'Z', link: 'https://l/4', reason: 'posting asks for 12+ years' },
-      { title: 'Night Ops', company: 'W', link: 'https://l/5', reason: 'night/rotational shift in JD' },
+      {
+        title: 'Lead Architect',
+        company: 'Z',
+        link: 'https://l/4',
+        reason: 'posting asks for 12+ years',
+      },
+      {
+        title: 'Night Ops',
+        company: 'W',
+        link: 'https://l/5',
+        reason: 'night/rotational shift in JD',
+      },
     ],
   });
 
@@ -352,9 +364,6 @@ test('the dry-run report groups skips by reason, decisions first', () => {
 });
 
 test('a dry run accounts for every job it looked at', () => {
-  // Only the two job-description screens used to report themselves, so a run that
-  // saw 60 postings and skipped 55 as already-applied showed 5 — which reads as
-  // "the search found almost nothing".
   const { noteDryRunSkip, dryRunTally, resetRunState } = require('../linkedin');
   resetRunState();
   for (const reason of [

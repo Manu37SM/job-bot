@@ -1,5 +1,3 @@
-// Exercises fillLinkedInForm against a fake Playwright surface. These tests pin
-// down the failure classification — the thing the whole review report is built on.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -7,13 +5,9 @@ const { FakeForm, makePage } = require('./helpers/fake-page');
 const { fillLinkedInForm } = require('../linkedin');
 const config = require('../config');
 
-// The real code paces itself; a fake page has nothing to wait for.
 const originalSpeed = config.speed;
 config.speed = 'instant';
 
-// fillLinkedInForm narrates every decision. That is useful during a run and, at
-// this volume, it overwhelms node:test's IPC framing and aborts the whole file
-// partway through — so it is muted here and restored afterwards.
 const realConsole = { log: console.log, warn: console.warn, error: console.error };
 const mute = () => {
   console.log = () => {};
@@ -33,7 +27,10 @@ test.after(() => {
 
 const run = (steps) => {
   const form = new FakeForm(steps);
-  return fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme').then((result) => ({ result, form }));
+  return fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme').then((result) => ({
+    result,
+    form,
+  }));
 };
 
 test('a form the bot can answer is submitted', async () => {
@@ -42,7 +39,12 @@ test('a form the bot can answer is submitted', async () => {
       button: 'Submit',
       fields: [
         { kind: 'text', label: 'Email address', required: true },
-        { kind: 'radio', label: 'Are you legally authorized to work in India?', options: ['Yes', 'No'], required: true },
+        {
+          kind: 'radio',
+          label: 'Are you legally authorized to work in India?',
+          options: ['Yes', 'No'],
+          required: true,
+        },
       ],
     },
   ]);
@@ -56,7 +58,12 @@ test('the answer trail records what was actually submitted', async () => {
       button: 'Submit',
       fields: [
         { kind: 'text', label: 'Email address', required: true },
-        { kind: 'radio', label: 'Are you legally authorized to work in India?', options: ['Yes', 'No'], required: true },
+        {
+          kind: 'radio',
+          label: 'Are you legally authorized to work in India?',
+          options: ['Yes', 'No'],
+          required: true,
+        },
       ],
     },
   ]);
@@ -68,7 +75,10 @@ test('the answer trail records what was actually submitted', async () => {
 test('an unanswerable required question produces `unanswerable`, naming the question', async () => {
   const question = 'Do you have experience working in fast-paced environments?';
   const { result, form } = await run([
-    { button: 'Submit', fields: [{ kind: 'radio', label: question, options: ['Yes', 'No'], required: true }] },
+    {
+      button: 'Submit',
+      fields: [{ kind: 'radio', label: question, options: ['Yes', 'No'], required: true }],
+    },
   ]);
   assert.equal(result.ok, false);
   assert.equal(result.code, 'unanswerable', result.reason);
@@ -81,7 +91,17 @@ test('an unanswerable required question produces `unanswerable`, naming the ques
 
 test('a protected-characteristic question with no decline option is refused, not guessed', async () => {
   const { result, form } = await run([
-    { button: 'Submit', fields: [{ kind: 'radio', label: 'What is your gender?', options: ['Male', 'Female'], required: true }] },
+    {
+      button: 'Submit',
+      fields: [
+        {
+          kind: 'radio',
+          label: 'What is your gender?',
+          options: ['Male', 'Female'],
+          required: true,
+        },
+      ],
+    },
   ]);
   assert.equal(result.ok, false);
   assert.equal(result.code, 'unanswerable');
@@ -114,7 +134,9 @@ test('a field that rejects every value produces `invalid_field` with the blocker
   const { result } = await run([
     {
       button: 'Submit',
-      fields: [{ kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true }],
+      fields: [
+        { kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true },
+      ],
     },
   ]);
   assert.equal(result.ok, false);
@@ -129,7 +151,14 @@ test('a multi-step form is walked to the end', async () => {
     { button: 'Next', fields: [{ kind: 'text', label: 'Mobile phone number', required: true }] },
     {
       button: 'Submit',
-      fields: [{ kind: 'radio', label: 'Do you consent to a background check?', options: ['Yes', 'No'], required: true }],
+      fields: [
+        {
+          kind: 'radio',
+          label: 'Do you consent to a background check?',
+          options: ['Yes', 'No'],
+          required: true,
+        },
+      ],
     },
   ]);
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -142,17 +171,25 @@ test('a blocked step on page two is reported, not silently submitted', async () 
     { button: 'Next', fields: [{ kind: 'text', label: 'Email address', required: true }] },
     {
       button: 'Submit',
-      fields: [{ kind: 'radio', label: 'Do you have experience with Erlang?', options: ['Yes', 'No'], required: true }],
+      fields: [
+        {
+          kind: 'radio',
+          label: 'Do you have experience with Erlang?',
+          options: ['Yes', 'No'],
+          required: true,
+        },
+      ],
     },
   ]);
-  // Erlang is not on the CV, so this is answerable — honestly, as "No".
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(form.submitted, true);
   assert.equal(result.answered.find((a) => /Erlang/.test(a.question)).answer, 'No');
 });
 
 test('the modal disappearing mid-fill is reported as modal_missing', async () => {
-  const form = new FakeForm([{ button: 'Next', fields: [{ kind: 'text', label: 'Email address' }] }]);
+  const form = new FakeForm([
+    { button: 'Next', fields: [{ kind: 'text', label: 'Email address' }] },
+  ]);
   form.closed = true;
   const result = await fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme');
   assert.equal(result.ok, false);
@@ -186,8 +223,6 @@ test('salary reaches the field with the unit conversion applied', async () => {
 });
 
 test('the phone number reaches the trail even though a special case fills it', async () => {
-  // It is filled outside the generic text loop, which then skips it because it
-  // already has a value — so it went out under the candidate's name unrecorded.
   const { result } = await run([
     { button: 'Submit', fields: [{ kind: 'text', label: 'Mobile phoneNumber', required: true }] },
   ]);
@@ -199,13 +234,12 @@ test('the phone number reaches the trail even though a special case fills it', a
 });
 
 test('a rejected value is not reported as a missing answer', async () => {
-  // Different problems, different fixes: a missing fact goes in config.js, a
-  // rejected value is a format to correct. Reporting the second as the first
-  // sends the reader looking for an answer that is already there.
   const { result } = await run([
     {
       button: 'Submit',
-      fields: [{ kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true }],
+      fields: [
+        { kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true },
+      ],
     },
   ]);
   assert.equal(result.code, 'invalid_field');
@@ -228,8 +262,6 @@ test('when both problems occur, the missing answer is named as the cause', async
       ],
     },
   ]);
-  // A question with no answer is the actionable one; the rejection still rides
-  // along in blockers so nothing is lost.
   assert.equal(result.code, 'unanswerable');
   assert.match(result.reason, /fast-paced/);
   assert.match(result.blockers.join(' | '), /the field refused/);
@@ -249,7 +281,6 @@ test('a dropdown whose options match no answer is refused for a skill question',
       ],
     },
   ]);
-  // Picking "Expert" because it happens to be first is a fabricated skill claim.
   assert.equal(result.ok, false);
   assert.equal(form.submitted, false);
   assert.match(result.code, /unanswerable|invalid_field/);
@@ -293,8 +324,6 @@ test('a "which of these have you used" group ticks only what is on the CV', asyn
 });
 
 test('a group where nothing matches is left blank rather than ticked at random', async () => {
-  // Ticking the first box to satisfy a required group invents a skill. The form
-  // stalls instead, and the question reaches needs-review.md.
   const { result, form } = await run([
     {
       button: 'Submit',
@@ -316,12 +345,10 @@ test('a group where nothing matches is left blank rather than ticked at random',
 });
 
 test('a form that never advances is reported as stuck, not retried forever', async () => {
-  // A step whose button does nothing: the real symptom of a LinkedIn step that
-  // silently rejects. It must terminate rather than spinning to the step cap.
   const form = new FakeForm([
     { button: 'Next', fields: [{ kind: 'text', label: 'Email address', required: true }] },
   ]);
-  form.pressButton = () => {}; // the button is inert
+  form.pressButton = () => {};
   const result = await fillLinkedInForm(makePage(form), 'Backend Engineer', 'Acme');
   assert.equal(result.ok, false);
   assert.match(result.code, /stuck_form|no_action/);
@@ -351,15 +378,16 @@ test('an already-answered field is left alone', async () => {
     },
   ]);
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(form.steps[0].fields[0].value, 'typed@by.hand', 'a prefilled value must not be overwritten');
+  assert.equal(
+    form.steps[0].fields[0].value,
+    'typed@by.hand',
+    'a prefilled value must not be overwritten'
+  );
 });
 
 const { closeModal } = require('../linkedin');
 
 test('closing the modal escalates until it actually goes', async () => {
-  // Every fallback used to be unreachable: each await inside the try ended in
-  // .catch(() => {}), so nothing could throw, so the catch block holding them
-  // never ran. A modal left open means the next job opens on a stale form.
   for (const behaviour of ['button', 'escape', 'dom']) {
     const form = new FakeForm([{ button: 'Next', fields: [] }]);
     form.dismissBehaviour = behaviour;
@@ -390,13 +418,13 @@ test('a modal that refuses to close is reported, not assumed gone', async () => 
   form.dismissBehaviour = 'stuck';
   const closed = await closeModal(makePage(form));
   assert.equal(closed, false, 'the caller has to be able to know');
-  assert.ok(form.escapePresses > 0 && form.domRemovals > 0, 'every fallback should have been tried');
+  assert.ok(
+    form.escapePresses > 0 && form.domRemovals > 0,
+    'every fallback should have been tried'
+  );
 });
 
 test('a radio whose options match no answer is not clicked at random', async () => {
-  // The answer EXISTS here ("Yes") but no option contains it, so the code reaches
-  // its last-resort "click the first option" fallback. For an eligibility question
-  // that fallback is a fabricated claim — the only tested path was the dropdown.
   const { result, form } = await run([
     {
       button: 'Submit',
@@ -416,8 +444,6 @@ test('a radio whose options match no answer is not clicked at random', async () 
 });
 
 test('the same fallback DOES fire for harmless boilerplate', async () => {
-  // The mirror case: refusing everything would stall forms on questions where any
-  // answer is fine, so the guard has to be selective rather than absolute.
   const { result, form } = await run([
     {
       button: 'Submit',
@@ -436,12 +462,13 @@ test('the same fallback DOES fire for harmless boilerplate', async () => {
 });
 
 test('a blocked field stops the form at that step, not three clicks later', async () => {
-  // The invalid-field check before "Next" was only tested on a submit step. On a
-  // multi-step form the difference matters: without it the bot clicks Next into a
-  // form that will not move and reports `stuck_form` — true, but useless, where
-  // `invalid_field` names the field and its validation message.
   const { result, form } = await run([
-    { button: 'Next', fields: [{ kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true }] },
+    {
+      button: 'Next',
+      fields: [
+        { kind: 'number', label: 'Years of experience', required: true, rejectsEverything: true },
+      ],
+    },
     { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
   ]);
   assert.equal(result.code, 'invalid_field', result.reason);
@@ -452,7 +479,6 @@ test('a blocked field stops the form at that step, not three clicks later', asyn
 });
 
 test('a step with no problems still advances', async () => {
-  // Guards the test above from passing because nothing ever advances.
   const { result, form } = await run([
     { button: 'Next', fields: [{ kind: 'text', label: 'Email address', required: true }] },
     { button: 'Submit', fields: [{ kind: 'text', label: 'Mobile phone number', required: true }] },
@@ -463,8 +489,6 @@ test('a step with no problems still advances', async () => {
 });
 
 test('a submit LinkedIn never confirms is not recorded as applied', async () => {
-  // The worst possible false positive: a job logged as applied when it wasn't is
-  // permanent, because alreadyApplied() then blocks it from ever being retried.
   const form = new FakeForm([
     { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
   ]);
@@ -476,7 +500,6 @@ test('a submit LinkedIn never confirms is not recorded as applied', async () => 
 });
 
 test('a confirmed submit is recorded as applied', async () => {
-  // The mirror, so the test above cannot pass by refusing everything.
   const form = new FakeForm([
     { button: 'Submit', fields: [{ kind: 'text', label: 'Email address', required: true }] },
   ]);

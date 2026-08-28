@@ -1,4 +1,3 @@
-// Runs against a scratch log file, never the real applications.json.
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -59,8 +58,6 @@ test('editing the answer files un-parks a deterministic failure', () => {
       appliedAt: new Date().toISOString(),
     },
   ]);
-  // A different fingerprint means config.js / resume-profile.js actually changed,
-  // so the question may now be answerable — the whole point of the mechanism.
   assert.equal(logger.shouldSkipJob('900'), null);
 });
 
@@ -165,16 +162,17 @@ test('a corrupt log does not read as an empty history', () => {
   ]);
   assert.equal(logger.alreadyApplied('900'), true);
   fs.writeFileSync(SCRATCH, '{ this is not json');
-  // Falling back to "nothing applied yet" here would re-apply to every job.
   assert.equal(logger.alreadyApplied('900'), true);
 });
 
 test('jobs with no extractable id stay distinct in the log', () => {
-  // These all used to be written with jobId "undefined", which merged unrelated
-  // postings into one row, one open failure, and one skip counter.
   reset();
-  logger.recordApplication(job({ jobId: undefined, title: 'Role A', company: 'Acme', status: 'failed', code: 'timeout' }));
-  logger.recordApplication(job({ jobId: undefined, title: 'Role B', company: 'Globex', status: 'failed', code: 'timeout' }));
+  logger.recordApplication(
+    job({ jobId: undefined, title: 'Role A', company: 'Acme', status: 'failed', code: 'timeout' })
+  );
+  logger.recordApplication(
+    job({ jobId: undefined, title: 'Role B', company: 'Globex', status: 'failed', code: 'timeout' })
+  );
   const failures = logger.openFailures();
   assert.equal(failures.length, 2, 'two different jobs must not share an entry');
   assert.ok(failures.every((f) => f.idSynthesised));
@@ -183,9 +181,13 @@ test('jobs with no extractable id stay distinct in the log', () => {
 test('repeat skips of an id-less job still collapse, per job', () => {
   reset();
   for (let i = 0; i < 3; i++) {
-    logger.recordApplication(job({ jobId: null, title: 'Role A', company: 'Acme', status: 'skipped' }));
+    logger.recordApplication(
+      job({ jobId: null, title: 'Role A', company: 'Acme', status: 'skipped' })
+    );
   }
-  logger.recordApplication(job({ jobId: null, title: 'Role B', company: 'Globex', status: 'skipped' }));
+  logger.recordApplication(
+    job({ jobId: null, title: 'Role B', company: 'Globex', status: 'skipped' })
+  );
   const skipped = logger.loadLog().filter((e) => e.status === 'skipped');
   assert.equal(skipped.length, 2);
   assert.equal(skipped.find((e) => e.title === 'Role A').seenCount, 3);
@@ -195,7 +197,6 @@ test('a synthetic id never collides with a real one', () => {
   const synthetic = logger.syntheticId('Backend Engineer', 'Acme');
   assert.match(synthetic, /^x:/);
   assert.equal(logger.alreadyApplied(undefined), false);
-  // Real ids are numeric strings, so the "x:" prefix keeps the two namespaces apart.
   assert.notEqual(synthetic, '4451627000');
 });
 
@@ -215,8 +216,6 @@ test('a job set aside after the attempt limit gets another chance later', () => 
   reset(attempts(recent));
   assert.match(logger.shouldSkipJob('900'), /set aside/);
 
-  // LinkedIn changes its markup and this bot gets fixed — a job written off during
-  // a bad week should not be lost forever.
   reset(attempts(old));
   assert.equal(logger.shouldSkipJob('900'), null);
 });
@@ -234,21 +233,19 @@ test('a deterministic failure stays parked regardless of age', () => {
       appliedAt: old,
     },
   ]);
-  // Time alone changes nothing here — only editing the answer files can.
   assert.match(logger.shouldSkipJob('900'), /answers unchanged/);
 });
 
 test('two writes in the same millisecond are never confused for one', () => {
-  // A stat-based (mtime + size) read cache was quietly wrong here: two writes in
-  // the same millisecond producing the same file length are indistinguishable, so
-  // the second read returned the first write's contents. A stale read in this
-  // log means re-applying to a job already applied to.
   let stale = 0;
   for (let i = 0; i < 200; i++) {
-    // Same shape, same length, different value.
-    reset([{ jobId: '1', status: 'failed', code: 'timeout', appliedAt: '2020-01-01T00:00:00.000Z' }]);
+    reset([
+      { jobId: '1', status: 'failed', code: 'timeout', appliedAt: '2020-01-01T00:00:00.000Z' },
+    ]);
     const first = logger.loadLog()[0].appliedAt;
-    reset([{ jobId: '1', status: 'failed', code: 'timeout', appliedAt: '2026-12-31T00:00:00.000Z' }]);
+    reset([
+      { jobId: '1', status: 'failed', code: 'timeout', appliedAt: '2026-12-31T00:00:00.000Z' },
+    ]);
     const second = logger.loadLog()[0].appliedAt;
     if (first === second) stale++;
   }

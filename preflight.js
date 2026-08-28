@@ -1,8 +1,3 @@
-// Config validation that runs before any browser opens. Every problem here used to
-// surface as a mysterious mid-run failure — a missing resume meant upload fields
-// were silently skipped, a bad customAnswers entry was ignored without a word, and
-// a typo'd skill name simply never matched. Ten seconds of checking beats
-// discovering it twenty applications in.
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
@@ -74,9 +69,6 @@ function numberIssues() {
   return issues;
 }
 
-// The resume summary and config.experienceYears are both quoted to recruiters —
-// the cover letter prints the config figure in the same paragraph as the summary.
-// A mismatch between them reads as carelessness at best.
 function consistencyIssues() {
   const issues = [];
   let profile;
@@ -187,8 +179,6 @@ function answerIssues() {
   return issues;
 }
 
-// An unrecognised level name produces an EMPTY f_E filter, which silently widens
-// the search to every seniority instead of narrowing it — the opposite of intent.
 function searchIssues() {
   const issues = [];
   const search = config.search || {};
@@ -212,7 +202,10 @@ function searchIssues() {
 
   const days = search.postedWithinDays;
   if (days != null && (!Number.isFinite(Number(days)) || Number(days) < 0)) {
-    issues.push({ level: 'error', message: 'search.postedWithinDays must be a positive number or null.' });
+    issues.push({
+      level: 'error',
+      message: 'search.postedWithinDays must be a positive number or null.',
+    });
   }
   if (Number(days) > 0 && Number(days) < 1) {
     issues.push({
@@ -235,7 +228,6 @@ function collectIssues() {
   ];
 }
 
-// Returns true when it is safe to proceed.
 function runPreflight({ quiet = false } = {}) {
   const issues = collectIssues();
   const errors = issues.filter((i) => i.level === 'error');

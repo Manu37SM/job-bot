@@ -1,6 +1,3 @@
-// Property tests. The individual cases elsewhere pin down specific bugs; these
-// assert the rules that must hold across the whole space of phrasings, because the
-// next false claim will arrive in wording nobody wrote a case for.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -13,13 +10,24 @@ const YN = ['Yes', 'No'];
 const affirmative = (a) => /^(yes|yes,|i (?:do|am|have)|true|agree)/i.test(String(a).trim());
 const negative = (a) => /^(no|no,|i (?:do not|don't|am not))/i.test(String(a).trim());
 
-const ask = (q, options = YN, type = 'radio') => answerQuestion(q, 'Backend Engineer', 'Acme', type, options);
+const ask = (q, options = YN, type = 'radio') =>
+  answerQuestion(q, 'Backend Engineer', 'Acme', type, options);
 
 const cross = (templates, subjects) =>
   templates.flatMap((t) => subjects.map((s) => t.replace('{}', s)));
 
-// Technologies that appear nowhere in the CV or the resume text.
-const ABSENT = ['Rust', 'COBOL', 'Fortran', 'Elixir', 'Haskell', 'Scala', 'Erlang', 'Julia', 'Clojure', 'Delphi'];
+const ABSENT = [
+  'Rust',
+  'COBOL',
+  'Fortran',
+  'Elixir',
+  'Haskell',
+  'Scala',
+  'Erlang',
+  'Julia',
+  'Clojure',
+  'Delphi',
+];
 const PRESENT = ['Java', 'Kafka', 'Kubernetes', 'Docker', 'React', 'PostgreSQL'];
 
 const CAPABILITY_TEMPLATES = [
@@ -60,7 +68,15 @@ test('no protected-characteristic question is ever answered with a substantive v
       'How would you describe your {}?',
       'Do you identify with any {}?',
     ],
-    ['gender', 'race', 'ethnicity', 'sexual orientation', 'religion', 'disability status', 'veteran status']
+    [
+      'gender',
+      'race',
+      'ethnicity',
+      'sexual orientation',
+      'religion',
+      'disability status',
+      'veteran status',
+    ]
   ).concat([
     'Are you a protected veteran?',
     'Do you have a disability?',
@@ -74,14 +90,23 @@ test('no protected-characteristic question is ever answered with a substantive v
   for (const q of questions) {
     const options = ['Male', 'Female', 'Yes', 'No', 'I prefer not to say'];
     const answer = String(await ask(q, options));
-    // The only permitted outcomes are silence or the form's own decline option.
     if (answer && !policy.DECLINE.test(answer)) bad.push(`${q} -> ${answer}`);
   }
   assert.deepEqual(bad, [], `answered a protected-characteristic question:\n${bad.join('\n')}`);
 });
 
 test('authorization is never claimed for a country not on the list', async () => {
-  const countries = ['the United States', 'the US', 'the USA', 'the UK', 'Canada', 'Australia', 'Germany', 'Singapore', 'Japan'];
+  const countries = [
+    'the United States',
+    'the US',
+    'the USA',
+    'the UK',
+    'Canada',
+    'Australia',
+    'Germany',
+    'Singapore',
+    'Japan',
+  ];
   const templates = [
     'Are you legally authorized to work in {}?',
     'Do you have the right to work in {}?',
@@ -138,7 +163,11 @@ test('a quantity question never receives a yes/no', async () => {
 test('a claimed year count never exceeds total experience', async () => {
   const bad = [];
   for (const skill of [...PRESENT, ...ABSENT]) {
-    const answer = await ask(`How many years of experience do you have with ${skill}?`, [], 'number');
+    const answer = await ask(
+      `How many years of experience do you have with ${skill}?`,
+      [],
+      'number'
+    );
     const years = Number(answer);
     if (Number.isFinite(years) && years > Number(config.experienceYears)) {
       bad.push(`${skill} -> ${answer} (total is ${config.experienceYears})`);
@@ -148,7 +177,16 @@ test('a claimed year count never exceeds total experience', async () => {
 });
 
 test('no credential absent from the CV is ever claimed', async () => {
-  const credentials = ['PMP', 'CISSP', 'AWS Solutions Architect', 'Azure Administrator', 'CFA', 'Six Sigma Black Belt', 'PRINCE2', 'CCNA'];
+  const credentials = [
+    'PMP',
+    'CISSP',
+    'AWS Solutions Architect',
+    'Azure Administrator',
+    'CFA',
+    'Six Sigma Black Belt',
+    'PRINCE2',
+    'CCNA',
+  ];
   const templates = [
     'Do you hold a {} certification?',
     'Are you {} certified?',

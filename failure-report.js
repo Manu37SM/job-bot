@@ -53,9 +53,6 @@ function groupBlockers(failures) {
   return [...groups.values()].sort((a, b) => b.jobs.length - a.jobs.length);
 }
 
-// The stored link is whatever the results page URL happened to be, which opens
-// the search rather than the posting. When the jobId is known, the canonical
-// permalink is far more useful in a report you are meant to click through.
 function jobUrl(failure) {
   const id = String(failure.jobId || '').trim();
   if (/^\d+$/.test(id)) return `https://www.linkedin.com/jobs/view/${id}`;
@@ -63,8 +60,6 @@ function jobUrl(failure) {
 }
 
 function jobLine(failure) {
-  // Entries logged before the scraper tidied its output still carry raw innerText,
-  // padding and all. Tidy at render time so the report reads the same either way.
   const title = cleanText(failure.title) || 'Unknown role';
   const company = cleanCompany(failure.company) || 'Unknown company';
   const where = `${title} @ ${company}`;
@@ -72,15 +67,10 @@ function jobLine(failure) {
   return url ? `[${where}](${url})` : where;
 }
 
-// A ready-to-paste config.customAnswers entry for one question. This is the
-// escape hatch for everything the bot deliberately refuses to guess at, so the
-// report should hand it over rather than describe it.
 function customAnswerSnippet(group) {
   const question = String(group.question || '')
     .replace(/\s+/g, ' ')
     .trim();
-  // Match on a distinctive slice rather than the whole sentence: the same question
-  // is worded slightly differently by different companies.
   const keywords = question
     .toLowerCase()
     .replace(/[^a-z0-9\s+#.-]/g, ' ')
@@ -94,10 +84,6 @@ function customAnswerSnippet(group) {
     )
     .slice(0, 4)
     .join('.*');
-  // `answer` is deliberately left EMPTY. Pre-filling it with the form's first
-  // option would put a specific claim in the candidate's mouth — "Male", "Yes, I
-  // work night shifts" — which is precisely what this whole layer exists to stop.
-  // The options are listed alongside so the choice is easy but still theirs.
   const choices = (group.options || []).length
     ? `  // options: ${group.options.slice(0, 10).join(' | ')}`
     : '';
@@ -108,10 +94,6 @@ function customAnswerSnippet(group) {
 function suggestFix(group) {
   const q = normalizeQuestion(group.question);
 
-  // Classified questions come first, and by asking question-policy.js rather than
-  // re-deriving the categories here. Duplicating those regexes is how "What is your
-  // date of birth?" ended up with generic advice while "What is your gender?" got
-  // the right answer — the copy had drifted from the original.
   const kind = classify(group.question);
   if (kind === 'eeo') {
     return 'Protected-characteristic question — the bot will not answer it for you. Add a `customAnswers` entry if you want it filled.';
@@ -131,18 +113,18 @@ function suggestFix(group) {
       ? `Add \`'${skill}': <years>\` to \`skillExperienceYears\` in config.js.`
       : 'Add a `customAnswers` entry with the number (see below).';
   }
-  if (/salary|ctc|compensation|\brate\b/.test(q)) return 'Check `currentCTC` / `expectedCTC` in config.js.';
-  if (/notice|join|start date|available/.test(q)) return 'Check `noticePeriod` / `lastWorkingDay` in config.js.';
-  if (/certif|licen[cs]e|credential|accredit/.test(q)) return 'Add it to `certifications` in resume-profile.js.';
+  if (/salary|ctc|compensation|\brate\b/.test(q))
+    return 'Check `currentCTC` / `expectedCTC` in config.js.';
+  if (/notice|join|start date|available/.test(q))
+    return 'Check `noticePeriod` / `lastWorkingDay` in config.js.';
+  if (/certif|licen[cs]e|credential|accredit/.test(q))
+    return 'Add it to `certifications` in resume-profile.js.';
   if (/degree|bachelor|master|graduat|educat|university|college/.test(q)) {
     return 'Add it to `education` in resume-profile.js.';
   }
   if (/location|city|commute/.test(q)) return 'Check `locations` in config.js.';
 
   if (/experience|familiar|proficien|knowledge of|worked with/.test(q)) {
-    // Only point at the skills list when the question is actually about a
-    // technology. "Experience in fast-paced environments" is not something to add
-    // to `skills`, and saying so sends the reader on a pointless errand.
     const subject = extractSkill(group.question);
     return subject && looksLikeTechnology(subject)
       ? 'Add the technology to `skills` in resume-profile.js.'
@@ -245,8 +227,6 @@ function buildReport(failures) {
     lines.push('');
   }
 
-  // Grouped by cause rather than one flat list. A hundred lines of "Every open
-  // job" is not something anyone reads; "26 timed out, 4 need an answer" is.
   const byCode = new Map();
   for (const failure of failures) {
     const key = failure.code || '';
@@ -255,7 +235,6 @@ function buildReport(failures) {
   }
 
   const groups = [...byCode.entries()].sort((a, b) => {
-    // Things the candidate can act on come first.
     const actionable = (code) => (isTransient(code) ? 1 : 0);
     if (actionable(a[0]) !== actionable(b[0])) return actionable(a[0]) - actionable(b[0]);
     return b[1].length - a[1].length;
@@ -284,8 +263,6 @@ function buildReport(failures) {
             : 'waiting on your answers';
       const when = String(failure.appliedAt).slice(0, 16).replace('T', ' ');
       lines.push(`- ${jobLine(failure)}`);
-      // The code is already the heading, so only a reason that adds something is
-      // worth repeating under every single row.
       if (failure.reason && failure.reason !== describeCode(failure.code)) {
         lines.push(`  - ${failure.reason}`);
       }
@@ -301,8 +278,6 @@ function writeReviewReport() {
   const failures = openFailures();
 
   if (failures.length === 0) {
-    // Best-effort: a locked or read-only file must not take the whole run down
-    // at the very last step, after every application has already been made.
     try {
       if (fs.existsSync(REPORT_FILE)) fs.unlinkSync(REPORT_FILE);
     } catch {
@@ -325,11 +300,11 @@ function writeReviewReport() {
 
 const DRY_RUN_FILE = path.join(__dirname, 'dry-run.md');
 
-// A dry run's whole point is to answer "are these the right jobs?" before any
-// application is spent. A count on the terminal cannot answer that; a list can.
 function buildDryRunReport({ jobs = [], screened = [] }) {
   const lines = ['# Dry run', ''];
-  lines.push(`**${jobs.length}** jobs would have been applied to; **${screened.length}** were screened out.`);
+  lines.push(
+    `**${jobs.length}** jobs would have been applied to; **${screened.length}** were screened out.`
+  );
   lines.push('');
   lines.push('Nothing was applied to and nothing was written to `applications.json`.');
   lines.push('');
@@ -345,9 +320,6 @@ function buildDryRunReport({ jobs = [], screened = [] }) {
   }
 
   if (screened.length) {
-    // Grouped by reason, and ordered so the ones worth acting on come first.
-    // "Already applied" is usually most of the list and is not a decision to
-    // review — collapsing it keeps the rows that ARE decisions visible.
     const byReason = new Map();
     for (const job of screened) {
       const reason = job.reason || 'skipped';
@@ -355,7 +327,6 @@ function buildDryRunReport({ jobs = [], screened = [] }) {
       byReason.get(reason).push(job);
     }
 
-    // A reason the candidate might want to change, versus bookkeeping.
     const actionable = (reason) => !/already applied|per-company cap/i.test(reason);
 
     const groups = [...byReason.entries()].sort((a, b) => {
@@ -372,8 +343,9 @@ function buildDryRunReport({ jobs = [], screened = [] }) {
       lines.push(`### ${reason} — ${group.length}`);
       lines.push('');
       if (!actionable(reason)) {
-        // Bookkeeping: the count is the whole message.
-        lines.push(`_${group.length} job${group.length === 1 ? '' : 's'}, listed for completeness._`);
+        lines.push(
+          `_${group.length} job${group.length === 1 ? '' : 's'}, listed for completeness._`
+        );
         lines.push('');
         lines.push('<details><summary>Show them</summary>');
         lines.push('');

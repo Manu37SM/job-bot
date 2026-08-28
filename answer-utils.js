@@ -25,29 +25,23 @@ function matchOption(answer, options) {
   );
 }
 
-// Resolves a bare number (e.g. "4.1") against range-style options like "3-5 years",
-// "5+ years", or "Less than 1 year" — common on LinkedIn for experience/salary/notice
-// questions asked as a dropdown or radio group instead of a free number field. Without
-// this, a raw number never matches any option text and the caller falls back to
-// blindly picking the first option, which is silently wrong.
-// Options that state a quantity in words rather than digits. "Immediate" is the
-// single most common answer to a notice-period question and carries no digits at
-// all, so it used to be skipped entirely — a candidate available immediately was
-// matched to "15 days", the nearest option that happened to contain a number.
 const WORD_QUANTITIES = [
-  { value: 0, pattern: /\bimmediate(?:ly)?\b|\bright away\b|\bavailable now\b|\basap\b|\bnone\b|\bnil\b|\bzero\b|\bcurrently serving\b/i },
+  {
+    value: 0,
+    pattern:
+      /\bimmediate(?:ly)?\b|\bright away\b|\bavailable now\b|\basap\b|\bnone\b|\bnil\b|\bzero\b|\bcurrently serving\b/i,
+  },
 ];
 
-// Ranges phrased in words. "More than 4 years" is [4, ∞), not the point 4 — without
-// this it tied with "2-4 years" on distance and lost on iteration order.
-const OPEN_UPPER = /\bmore than\b|\bover\b|\bat least\b|\bgreater than\b|\babove\b|\bminimum\b|\bplus\b|\band above\b|\bor more\b/i;
-const OPEN_LOWER = /\bless than\b|\bunder\b|\bbelow\b|\bfewer than\b|\bup to\b|\bat most\b|\bmaximum\b|\bor fewer\b|\bor less\b/i;
+const OPEN_UPPER =
+  /\bmore than\b|\bover\b|\bat least\b|\bgreater than\b|\babove\b|\bminimum\b|\bplus\b|\band above\b|\bor more\b/i;
+const OPEN_LOWER =
+  /\bless than\b|\bunder\b|\bbelow\b|\bfewer than\b|\bup to\b|\bat most\b|\bmaximum\b|\bor fewer\b|\bor less\b/i;
 
 function optionRange(text) {
   const word = WORD_QUANTITIES.find((entry) => entry.pattern.test(text));
   const nums = (text.match(/\d+(?:\.\d+)?/g) || []).map(Number);
 
-  // A worded quantity with no digits of its own ("Immediate", "None").
   if (word && nums.length === 0) return { lo: word.value, hi: word.value };
   if (nums.length === 0) return null;
 
@@ -72,9 +66,6 @@ function matchNumericOption(value, options) {
     if (num >= lo && num <= hi) return option;
 
     const distance = num < lo ? lo - num : num - hi;
-    // Strictly-less keeps the FIRST option on a tie, which is the right bias:
-    // option lists run low to high, and understating experience or notice period
-    // is the safer error of the two.
     if (distance < nearestDistance) {
       nearestDistance = distance;
       nearest = option;
@@ -104,11 +95,6 @@ function asksForSpecificSkillExperience(question) {
   const q = String(question || '').toLowerCase();
   if (!/experience|years?/.test(q)) return false;
 
-  // Questions explicitly about the whole career. The old exclusion list also
-  // contained the bare phrase "experience do you have", which matches "how many
-  // years of experience do you have WITH PYTHON?" — so a named technology fell
-  // through to the total-experience answer and claimed 4.1 years of a language
-  // that appears nowhere on the CV.
   if (/\b(?:total|overall|cumulative|professional|relevant|work|industry)\s+experience\b/.test(q)) {
     return false;
   }
@@ -117,9 +103,6 @@ function asksForSpecificSkillExperience(question) {
   return Boolean(subject) && policy.looksLikeTechnology(subject);
 }
 
-// True when config.lastWorkingDay is today or in the past — i.e. the candidate has
-// already left their previous job and is available immediately, regardless of what
-// noticePeriod says. Falls back to noticePeriod === 0 if the date can't be parsed.
 function isCurrentlyEmployed() {
   const lwd = new Date(config.lastWorkingDay);
   if (!Number.isNaN(lwd.getTime())) {
@@ -135,16 +118,8 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
   const q = String(question || '').toLowerCase();
   const yes = () => findOption(options, /\byes\b/i) || 'Yes';
   const no = () => findOption(options, /\bno\b/i) || 'No';
-  // Numeric facts (salary, notice period, experience) must resolve to one of the
-  // supplied options when the question is a radio/dropdown with range choices —
-  // otherwise a bare "4.1" never matches "3-5 years" and the caller silently picks
-  // whatever option happens to be first.
   const num = (value) => {
     if (!value || options.length === 0) return value;
-    // Skip matchOption's loose substring matching for numeric values: "0" is a
-    // substring of "30 days" and "60 days", so a naive .includes() check would
-    // match the wrong option. Numeric values get an exact match or a proper
-    // numeric-range match only.
     if (/^-?\d+(?:\.\d+)?$/.test(String(value).trim())) {
       const exact = options.find((o) => String(o).trim() === String(value).trim());
       return exact || matchNumericOption(value, options) || '';
@@ -152,23 +127,15 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
     return matchOption(value, options) || matchNumericOption(value, options) || '';
   };
 
-  // Checked FIRST, ahead of every convenience branch. These are the questions
-  // where a wrong answer is a false statement made under the candidate's name, so
-  // no earlier pattern may accidentally claim one of them (a stray "city" or
-  // "experience" substring is all it would take). See question-policy.js.
   const kind = policy.classify(question);
   if (kind === 'eeo') return policy.eeoAnswer(options);
   if (kind === 'work_authorization') return policy.workAuthorizationAnswer(question, options);
   if (kind === 'sponsorship') return policy.sponsorshipAnswer(question, options);
   if (kind === 'legal_history') return no();
-  // config.dayShiftOnly is a stated preference; agreeing to a night shift anyway
-  // is how the bot lands an interview for a job the candidate does not want.
   if (kind === 'shift' && config.dayShiftOnly) return no();
 
   if (q.includes('email')) return config.email;
   if (q.includes('phone') || q.includes('mobile')) return config.phone;
-  // "Country code" alone (no "phone"/"mobile") is the phone dial-code dropdown
-  // question some Easy Apply forms ask separately from the number itself.
   if (/country code/.test(q)) return config.phoneCountryCode || '';
   if (q.includes('current location') || q.includes('city')) return config.location;
   if (q.includes('country') && !/country code/.test(q)) return config.country || '';
@@ -188,9 +155,6 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
     return num(String(salary.total()));
   }
 
-  // Derived from the candidate's own current/expected CTC rather than a
-  // hardcoded 30% — a figure that contradicted config.js the moment either
-  // number changed, and is quoted back to recruiters as fact.
   if (/hike|increment|percentage increase|percentage hike/.test(q)) {
     const from = current.total();
     const to = expected.total();
@@ -205,9 +169,6 @@ function deterministicAnswer(question, inputType = 'text', options = []) {
 
   if (/last working day|lwd/.test(q)) return config.lastWorkingDay;
 
-  // Tenure is not career length. Handed to resume-profile, which knows the
-  // employment dates; answering it from config.experienceYears claims the whole
-  // career was spent at one employer.
   if (policy.isTenureQuestion(question)) return '';
 
   if (/experience|years? worked|how long/.test(q)) {
@@ -257,10 +218,6 @@ function localFallback(question, inputType = 'text', options = []) {
   const known = deterministicAnswer(question, inputType, options);
   if (known) return known;
 
-  // "Phrased as a question → answer Yes" is fine for consent boilerplate and
-  // harmless mechanics. It is not fine for a claim about the candidate's skills,
-  // eligibility, or protected characteristics, so those never reach it — they
-  // surface in needs-review.md instead, to be answered once in config.js.
   if (!policy.mayGuess(question)) return '';
 
   const q = String(question || '').toLowerCase();

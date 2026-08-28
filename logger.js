@@ -3,31 +3,16 @@ const path = require('path');
 const crypto = require('crypto');
 const { companyKey } = require('./text-utils');
 
-// Lazily required: config.js is user-edited and tests mutate it in place, so read
-// it at call time rather than capturing a snapshot at module load.
 const config = () => require('./config');
 
-// Overridable so tests can run against a scratch file instead of the real history.
 const LOG_FILE = process.env.JOB_BOT_LOG
   ? path.resolve(process.env.JOB_BOT_LOG)
   : path.join(__dirname, 'applications.json');
 
-// How many times a single job may fail before it is set aside.
 const MAX_FAILED_ATTEMPTS = 3;
 
-// ...and how long before it gets one more chance. "Retired permanently" was too
-// strong for a transient failure: LinkedIn changes its markup, and this bot gets
-// fixed. A job written off during a bad week would otherwise never be reconsidered,
-// even after the exact bug that killed it was repaired.
 const RETIRE_COOLDOWN_DAYS = 14;
 
-// Every failure is tagged with one of these codes so the bot can tell the
-// difference between "try again in a second" and "this will fail identically
-// forever until the candidate's answers change".
-//   transient: true  → worth an automatic retry, and worth re-attempting on a later run.
-//   transient: false → deterministic. Re-running changes nothing; the fix is in
-//                      config.js / resume-profile.js, so the job is parked until
-//                      one of those files actually changes.
 const FAILURE_CODES = {
   unanswerable: { transient: false, label: 'Question the bot has no answer for' },
   invalid_field: { transient: false, label: 'Value rejected by the form' },
@@ -44,16 +29,10 @@ function isTransient(code) {
 }
 
 function describeCode(code) {
-  // Entries written before failure diagnostics existed have no code at all —
-  // say so rather than labelling them "Unknown", which reads like a bug.
   if (!code) return 'Logged before diagnostics existed';
   return FAILURE_CODES[code]?.label || code;
 }
 
-// Fingerprint of everything the bot draws answers from. A non-transient failure
-// is only worth re-attempting once this changes — that is the signal that the
-// user actually edited their answers, rather than just re-running the bot and
-// hoping.
 let fingerprintCache = null;
 function answersFingerprint() {
   if (fingerprintCache) return fingerprintCache;
@@ -73,7 +52,6 @@ function answersFingerprint() {
       hash.update(`missing:${file}`);
     }
   }
-  // The CV text answers skill questions, so editing it should un-park jobs too.
   try {
     const config = require('./config');
     const cvText = String(config.resumePath || '').replace(/\.pdf$/i, '.txt');
@@ -85,10 +63,6 @@ function answersFingerprint() {
   return fingerprintCache;
 }
 
-// Questions are compared loosely so the same prompt asked by two companies —
-// differing only in casing, spacing, or a trailing "*" required-marker — counts
-// once. Lives here rather than in failure-report.js so both the console summary
-// and the report group identically (and to avoid a require cycle).
 function normalizeQuestion(text) {
   return String(text || '')
     .toLowerCase()
@@ -98,21 +72,6 @@ function normalizeQuestion(text) {
     .trim();
 }
 
-// There is deliberately no read cache here.
-//
-// An earlier version keyed one on the file's mtime and size, which measured well
-// and was quietly wrong: two writes in the same millisecond that produce the same
-// file length are indistinguishable by stat, so the second read returned the first
-// write's contents. Nanosecond mtime and inode did not fix it — the mount's
-// timestamp granularity is coarser than the write rate.
-//
-// Measured on a 310KB log, a read-and-parse costs ~12ms, and a run makes perhaps a
-// hundred of them: about one second, inside a run that deliberately waits 45-150
-// seconds between applications. That is not a cost worth any risk of a stale read,
-// and a stale read here means re-applying to a job already applied to.
-//
-// `lastGoodLog` is NOT a cache — it is only the fallback for a corrupt file, so a
-// truncated write cannot read as "nothing applied yet" and re-apply to everything.
 let lastGoodLog = null;
 
 function loadLog() {
@@ -128,19 +87,12 @@ function loadLog() {
 }
 
 function saveLog(log) {
-  // Write to a temp file and rename, so a crash (or Ctrl+C) mid-write can never
-  // leave a truncated applications.json — which loadLog would silently treat as
-  // an empty history and re-apply to everything.
   const tmp = `${LOG_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(log, null, 2));
   fs.renameSync(tmp, LOG_FILE);
   lastGoodLog = log;
 }
 
-// When LinkedIn's job id can't be read from the URL, `String(jobId)` produced the
-// literal "undefined" for every such job — so they all shared one row in the log,
-// one entry in openFailures(), and one bucket in the skip dedup. Synthesise a
-// stable key from what we do know instead, so they stay distinct.
 function syntheticId(title, company) {
   const slug = (text) =>
     String(text || '')
@@ -176,8 +128,6 @@ function failuresFor(jobId, log = loadLog()) {
   return log.filter((e) => e && e.jobId === id && e.status === 'failed');
 }
 
-// Smart backoff. Returns null when the job is worth attempting, or a short
-// human-readable reason string when it should be skipped without opening it.
 function shouldSkipJob(jobId) {
   const id = normalizeId(jobId);
   if (!id) return null;
@@ -192,7 +142,6 @@ function shouldSkipJob(jobId) {
     if (daysSince == null || daysSince < RETIRE_COOLDOWN_DAYS) {
       return `failed ${failures.length}× already — set aside for ${RETIRE_COOLDOWN_DAYS} days`;
     }
-    // The cooldown has passed: worth one more look with whatever has changed since.
     return null;
   }
   if (last.code && !isTransient(last.code) && last.answersHash === answersFingerprint()) {
@@ -203,10 +152,6 @@ function shouldSkipJob(jobId) {
   return null;
 }
 
-// How many applications have EVER gone to one employer. The per-run cap stops a
-// burst; this stops the slow accumulation. In the real log, 27 applications had
-// gone to a single job-aggregator account and 13 to one recruitment consultancy —
-// 18% of every application ever sent, to four companies.
 function companyApplicationCount(company, platform) {
   const key = companyKey(company);
   if (!key) return 0;
@@ -219,7 +164,6 @@ function companyApplicationCount(company, platform) {
   ).length;
 }
 
-// Returns a reason string when this employer has had enough, or null.
 function companyLifetimeCapReached(company, platform) {
   const cap = Number(config().maxApplicationsPerCompanyTotal);
   if (!Number.isFinite(cap) || cap <= 0) return null;
@@ -269,9 +213,6 @@ function recordApplication({
   const id = realId || syntheticId(title, company);
   const now = new Date().toISOString();
 
-  // A run re-scans the same search pages, so the same job gets skipped over and
-  // over. Collapse repeats into one entry with a counter instead of appending a
-  // near-identical row every single run (which is what grew this file to megabytes).
   if (status === 'skipped') {
     const existing = log.find(
       (e) => e && e.jobId === id && e.platform === platform && e.status === 'skipped'
@@ -297,13 +238,8 @@ function recordApplication({
     appliedAt: now,
   };
 
-  // What was actually submitted under the candidate's name, capped so the log
-  // stays a reasonable size. This is the record that makes the answer-integrity
-  // rules auditable rather than merely asserted.
   if (answered?.length) entry.answers = answered.slice(0, 40);
 
-  // Marks an entry whose id had to be synthesised, so a later reader knows the
-  // link is the only reliable way back to the posting.
   if (!realId) entry.idSynthesised = true;
 
   if (status === 'failed') {
@@ -340,8 +276,6 @@ function recordApplication({
   }
 }
 
-// The set of jobs that are still open problems: failed, never subsequently
-// applied to. This is what the review report is built from.
 function openFailures(platform) {
   const log = loadLog();
   const appliedIds = new Set(log.filter((e) => e?.status === 'applied').map((e) => e.jobId));
@@ -358,9 +292,6 @@ function openFailures(platform) {
   return [...latest.values()];
 }
 
-// Collapse the duplicate "skipped" rows written by every earlier run (one per job
-// per run) into a single row carrying a seen counter. Purely a size/speed fix —
-// no applied or failed history is touched.
 function compactLog() {
   const log = loadLog();
   const out = [];
@@ -381,7 +312,6 @@ function compactLog() {
       continue;
     }
     existing.seenCount = (existing.seenCount || 1) + (entry.seenCount || 1);
-    // Keep the most recent sighting so the row still reflects reality.
     if (String(entry.appliedAt) > String(existing.lastSeenAt || existing.appliedAt)) {
       existing.lastSeenAt = entry.appliedAt;
       if (entry.reason) existing.reason = entry.reason;
@@ -392,8 +322,6 @@ function compactLog() {
   return { log: out, before: log.length, after: out.length, collapsed };
 }
 
-// Counters for THIS process only. printSummary is all-time, which is the wrong
-// lens right after a run — "did this run go well?" is the question being asked.
 const runStats = { applied: 0, failed: 0, skipped: 0, byCode: {}, blockingQuestions: new Map() };
 
 function noteRunStat(entry) {

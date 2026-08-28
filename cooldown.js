@@ -1,10 +1,3 @@
-// A persistent hold after LinkedIn rate-limits the account.
-//
-// The bot already stops the moment it sees the "we've briefly paused Easy Apply"
-// notice. What it could not do is stop the NEXT run, ten minutes later — and
-// running straight back into a safeguard is exactly how a temporary pause becomes
-// a lasting restriction. This records the event on disk so the hold survives the
-// process ending.
 const fs = require('fs');
 const path = require('path');
 
@@ -38,7 +31,6 @@ function holdHours() {
   }
 }
 
-// Called when a run aborts on LinkedIn's rate-limit notice.
 function recordThrottle(platform, message, now = Date.now()) {
   const state = readState();
   state.throttle = state.throttle || {};
@@ -51,8 +43,6 @@ function recordThrottle(platform, message, now = Date.now()) {
   return state.throttle[platform];
 }
 
-// Returns null when it is fine to run, or { until, hoursLeft, message } when a
-// hold is still in force.
 function activeHold(platform, now = Date.now()) {
   const entry = readState().throttle?.[platform];
   if (!entry?.until) return null;

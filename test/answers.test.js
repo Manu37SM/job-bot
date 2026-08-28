@@ -14,9 +14,6 @@ test('number inputs without an explicit step are integer-only', () => {
 });
 
 test('decimal experience prefers integers for integer-only fields, decimal as last resort', () => {
-  // Integer variants are tried first since a plain step=1 field rejects decimals;
-  // the raw decimal is kept as a fallback because some "number" inputs accept it
-  // anyway (browser step-validation is inconsistent).
   assert.deepEqual(
     buildNumericCandidates('4.1', 'Years of experience', {
       inputType: 'number',
@@ -28,10 +25,6 @@ test('decimal experience prefers integers for integer-only fields, decimal as la
 
 test('salary is converted to rupees only when the label asks for INR', () => {
   assert.deepEqual(
-    // '4' before '5': an integer-only CURRENT salary field rounds down. Current
-    // CTC is a fact companies verify against payslips, so rounding 4.7 up to 5
-    // overstates it. (Expected CTC is an ask rather than a claim and rounds the
-    // other way — see numeric.test.js.)
     buildNumericCandidates('4.7', 'Current CTC in LPA', {
       inputType: 'number',
       step: '',
@@ -93,17 +86,23 @@ test('provider answers must match a supplied option', () => {
 
 test('resume-answers never leaves a yes/no field blank (no AI, all local/CV-based)', async () => {
   assert.equal(
-    await answerQuestion('Do you have experience with Kong Gateway?', 'Backend Dev', 'Acme', 'radio', [
-      'Yes',
-      'No',
-    ]),
+    await answerQuestion(
+      'Do you have experience with Kong Gateway?',
+      'Backend Dev',
+      'Acme',
+      'radio',
+      ['Yes', 'No']
+    ),
     'Yes'
   );
   assert.equal(
-    await answerQuestion('Have you ever been convicted of a felony?', 'Backend Dev', 'Acme', 'radio', [
-      'Yes',
-      'No',
-    ]),
+    await answerQuestion(
+      'Have you ever been convicted of a felony?',
+      'Backend Dev',
+      'Acme',
+      'radio',
+      ['Yes', 'No']
+    ),
     'No'
   );
   assert.equal(
@@ -123,15 +122,27 @@ test('resume-answers never leaves a yes/no field blank (no AI, all local/CV-base
     ),
     'No'
   );
-  const shift = await answerQuestion('Select your shift preference', 'Backend Dev', 'Acme', 'select', [
-    'Morning',
-    'Evening',
-  ]);
-  assert.ok(['Morning', 'Evening'].includes(shift), 'ambiguous option questions still get an answer');
+  const shift = await answerQuestion(
+    'Select your shift preference',
+    'Backend Dev',
+    'Acme',
+    'select',
+    ['Morning', 'Evening']
+  );
+  assert.ok(
+    ['Morning', 'Evening'].includes(shift),
+    'ambiguous option questions still get an answer'
+  );
 });
 
 test('resume-answers builds textarea and cover letter content from the CV, not an API call', async () => {
-  const about = await answerQuestion('Tell us about yourself', 'Backend Dev', 'Acme', 'textarea', []);
+  const about = await answerQuestion(
+    'Tell us about yourself',
+    'Backend Dev',
+    'Acme',
+    'textarea',
+    []
+  );
   assert.equal(about, profile.summary);
 
   const letter = await generateCoverLetter('Backend Developer', 'Acme');
@@ -166,10 +177,13 @@ test('numeric facts resolve to range-bucket options instead of returning a bare 
 });
 
 test('short numeric answers do not falsely substring-match option text', () => {
-  // "0" is a character-substring of "30 days"/"60 days" — a naive .includes() match
-  // would wrongly pick one of those instead of the nearest real bucket.
   assert.equal(
-    deterministicAnswer('What is your notice period?', 'radio', ['15 days', '30 days', '60 days', '90 days']),
+    deterministicAnswer('What is your notice period?', 'radio', [
+      '15 days',
+      '30 days',
+      '60 days',
+      '90 days',
+    ]),
     '15 days'
   );
   assert.equal(

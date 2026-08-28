@@ -29,11 +29,12 @@ test('every position is paired with every location', () => {
 });
 
 test('the role varies fastest, not the city', () => {
-  // A short run should try every ROLE keyword in the first city, not the same
-  // keyword across five cities — the latter wastes the whole run on one role.
   const combos = buildCombinations(
     ['FullStack', 'Backend', 'Java'],
-    [{ location: 'Mumbai', workModes: [] }, { location: 'Pune', workModes: [] }]
+    [
+      { location: 'Mumbai', workModes: [] },
+      { location: 'Pune', workModes: [] },
+    ]
   );
   assert.deepEqual(
     combos.slice(0, 3).map((c) => c.position),
@@ -58,8 +59,6 @@ test('rotation moves the starting point without losing anything', () => {
 });
 
 test('consecutive runs start where the last one stopped', () => {
-  // The whole point: with 44 combinations and a budget of 8, a run that fills up
-  // in its first search must not make the next run repeat that same search.
   reset();
   const first = planSearches('linkedin');
   advanceSearchOffset('linkedin', 2);
@@ -101,5 +100,8 @@ test('an empty config produces an empty plan rather than throwing', () => {
 
 test('the real config produces one entry per position per location', () => {
   const { getLocationSearchPairs } = require('../location-helper');
-  assert.equal(buildCombinations().length, config.positions.length * getLocationSearchPairs().length);
+  assert.equal(
+    buildCombinations().length,
+    config.positions.length * getLocationSearchPairs().length
+  );
 });

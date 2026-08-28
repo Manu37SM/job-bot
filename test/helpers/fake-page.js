@@ -1,16 +1,6 @@
-// A minimal stand-in for the slice of Playwright that fillLinkedInForm actually
-// touches. The point is not to reimplement a browser — it is to make the failure
-// classification testable, so "this form produces an `unanswerable` failure naming
-// this question" is verified rather than asserted in a comment.
-//
-// A form is described as a list of steps; each step has fields and a button.
-
 let idCounter = 0;
 const nextId = () => `f${++idCounter}`;
 
-// One persistent document stub, installed once, rather than swapped in and out
-// around every evaluate() call. Swapping meant a nested or concurrent evaluate
-// could restore `document` to undefined while an outer one still needed it.
 const fieldsById = new Map();
 
 function installDocument() {
@@ -31,7 +21,7 @@ function installDocument() {
 class Field {
   constructor(spec) {
     Object.assign(this, {
-      kind: 'text', // text | number | textarea | select | radio | checkbox | file
+      kind: 'text',
       label: '',
       options: [],
       required: false,
@@ -40,7 +30,6 @@ class Field {
       selected: [],
       ariaInvalid: false,
       combobox: false,
-      // A field that refuses whatever is typed into it, to exercise invalid_field.
       rejectsEverything: false,
       step: '',
       id: nextId(),
@@ -72,7 +61,7 @@ class Handle {
   constructor(field, form, role = 'field') {
     this.field = field;
     this.form = form;
-    this.role = role; // field | option | button
+    this.role = role;
     this.optionText = '';
   }
 
@@ -119,8 +108,6 @@ class Handle {
     this.field.files = [path];
   }
 
-  // fillLinkedInForm passes DOM-ish callbacks; the fake answers with a plain object
-  // shaped like the element properties those callbacks read.
   async evaluate(fn, arg) {
     const field = this.field;
     const element = {
@@ -197,11 +184,7 @@ class FakeForm {
     this.submitted = false;
     this.closed = false;
     this.blockedClicks = 0;
-    // How this modal can be dismissed, so closeModal's escalating fallbacks can be
-    // exercised: 'button' | 'escape' | 'dom' | 'stuck'.
     this.dismissBehaviour = 'button';
-    // Whether LinkedIn acknowledges the submission. When false the form closes but
-    // shows no confirmation — the state that must NOT be recorded as applied.
     this.confirmsSubmission = true;
     this.escapePresses = 0;
     this.domRemovals = 0;
@@ -212,7 +195,6 @@ class FakeForm {
   }
 
   pressButton(buttonField) {
-    // A real form refuses to advance while a required field is empty.
     const blocking = this.current.fields.filter((f) => f.isInvalid);
     if (blocking.length) {
       this.blockedClicks++;
@@ -254,16 +236,24 @@ class FakeForm {
       });
     }
     if (scopeField && /input\[type="radio"\]:checked/.test(selector)) {
-      return scopeField.kind === 'radio' && scopeField.selected.length ? [new Handle(scopeField, this)] : [];
+      return scopeField.kind === 'radio' && scopeField.selected.length
+        ? [new Handle(scopeField, this)]
+        : [];
     }
     if (scopeField && /input\[type="radio"\]/.test(selector)) {
-      return scopeField.kind === 'radio' ? scopeField.options.map(() => new Handle(scopeField, this)) : [];
+      return scopeField.kind === 'radio'
+        ? scopeField.options.map(() => new Handle(scopeField, this))
+        : [];
     }
     if (scopeField && /input\[type="checkbox"\]:checked/.test(selector)) {
-      return scopeField.kind === 'checkbox' && scopeField.selected.length ? [new Handle(scopeField, this)] : [];
+      return scopeField.kind === 'checkbox' && scopeField.selected.length
+        ? [new Handle(scopeField, this)]
+        : [];
     }
     if (scopeField && /input\[type="checkbox"\]/.test(selector)) {
-      return scopeField.kind === 'checkbox' ? scopeField.options.map(() => new Handle(scopeField, this)) : [];
+      return scopeField.kind === 'checkbox'
+        ? scopeField.options.map(() => new Handle(scopeField, this))
+        : [];
     }
     if (scopeField && /legend|data-test-form-element-label/.test(selector)) {
       return [new Handle(scopeField, this)];
@@ -355,7 +345,6 @@ function makePage(form) {
     },
     $$: async (selector) => form.queryAll(selector),
     evaluate: async () => {
-      // Stands in for the DOM-removal fallback of last resort.
       form.domRemovals++;
       if (form.dismissBehaviour === 'dom') form.closed = true;
       return false;
@@ -368,15 +357,17 @@ function makePage(form) {
       },
     },
     click: async (selector) => {
-      if (form.dismissBehaviour === 'button' && /Dismiss|Discard|discard_application/.test(selector)) {
+      if (
+        form.dismissBehaviour === 'button' &&
+        /Dismiss|Discard|discard_application/.test(selector)
+      ) {
         form.closed = true;
       }
     },
-    // Selector-aware: only the submission-confirmation text is ever "visible".
-    // A locator that reports every selector as visible makes dismissPostSubmitPopup
-    // try to click a post-submit popup that isn't there.
     locator: (selector) => {
-      const isConfirmation = /application \(was \)\?sent|application submitted/.test(String(selector));
+      const isConfirmation = /application \(was \)\?sent|application submitted/.test(
+        String(selector)
+      );
       const node = {
         isVisible: async () => isConfirmation && form.submitted && form.confirmsSubmission,
         click: async () => {},

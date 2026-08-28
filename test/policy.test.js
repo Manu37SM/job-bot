@@ -33,21 +33,18 @@ test("a protected-characteristic question is answered only with the form's decli
     policy.eeoAnswer(['Yes', 'No', 'Decline to self-identify']),
     'Decline to self-identify'
   );
-  // No decline option offered → the bot says nothing rather than picking one.
   assert.equal(policy.eeoAnswer(['Male', 'Female']), '');
 });
 
 test('work authorization is answered per country, not optimistically', async () => {
   assert.deepEqual(policy.authorizedCountries(), ['india']);
   assert.equal(await ask('Are you legally authorized to work in India?'), 'Yes');
-  // The old code answered "Yes" to this — a false statement on every US posting.
   assert.equal(await ask('Are you legally authorized to work in the United States?'), 'No');
   assert.equal(await ask('Do you have the right to work in the UK?'), 'No');
   assert.equal(await ask('Are you authorized to work in Canada?'), 'No');
 });
 
 test('sponsorship is the mirror of authorization, not a blanket No', async () => {
-  // Previously a flat "No", which claims he needs no visa for anywhere on earth.
   assert.equal(
     await ask('Will you now or in the future require sponsorship to work in the United States?'),
     'Yes'
@@ -84,14 +81,11 @@ test('consent boilerplate is still answered Yes so forms do not stall', async ()
 test('skill claims come from the CV — never from an optimistic default', async () => {
   assert.equal(await ask('Do you have experience with Kong Gateway?'), 'Yes');
   assert.equal(await ask('Do you have experience with Kubernetes?'), 'Yes');
-  // Not on the CV. The old fallback answered "Yes" to anything starting "Do you…".
   assert.equal(await ask('Do you have experience with Rust?'), 'No');
   assert.equal(await ask('Are you proficient in COBOL?'), 'No');
 });
 
 test('a vague capability question is left for the candidate, not answered either way', async () => {
-  // "No" here could be wrong and "Yes" could be a lie, so it becomes an
-  // `unanswerable` failure that needs-review.md surfaces.
   assert.equal(await ask('Do you have experience working in fast-paced environments?'), '');
 });
 
@@ -112,9 +106,7 @@ test('a certification the CV does not contain is not claimed', async () => {
 
 test('relocation follows the configured location preferences', () => {
   assert.equal(policy.relocationAnswer('Are you willing to relocate to Thane?', YN), 'Yes');
-  // Bangalore is an otherCities entry, remote-only — so onsite relocation is No.
   assert.equal(policy.relocationAnswer('Are you willing to relocate to Bangalore?', YN), 'No');
-  // No city named and no stated policy: left for the candidate.
   assert.equal(policy.relocationAnswer('Are you willing to relocate?', YN), '');
 });
 
@@ -135,7 +127,6 @@ test('customAnswers override every other rule, including the refusals', () => {
     assert.equal(policy.customAnswer('What is your gender?', ['Male', 'Female']), 'Male');
     config.customAnswers = [{ match: 'night shift', answer: 'No' }];
     assert.equal(policy.customAnswer('Are you willing to work night shifts?', YN), 'No');
-    // A custom answer resolves against the form's own option text.
     config.customAnswers = [{ match: 'relocate', answer: 'yes' }];
     assert.equal(policy.customAnswer('Willing to relocate?', ['Yes, I am', 'No']), 'Yes, I am');
   } finally {
@@ -151,8 +142,6 @@ test('country detection does not confuse a company name for a work location', ()
 });
 
 test('attestation phrasing is consent, not a claim to hold a certification', async () => {
-  // "I certify that…" and "AWS certified" share the certif- stem but are opposites:
-  // one is a tickbox, the other a credential claim that must not be fabricated.
   assert.equal(policy.classify('I certify that the information above is accurate'), 'consent');
   assert.equal(policy.classify('Are you AWS certified?'), 'capability');
   assert.equal(await ask('I certify that the information above is accurate'), 'Yes');
@@ -176,15 +165,12 @@ test('a plain noun is not mistaken for a technology', () => {
 
 test('a stated dayShiftOnly preference is not traded away for an application', async () => {
   assert.equal(config.dayShiftOnly, true);
-  // The generic "phrased as a question → Yes" fallback used to answer these.
   assert.equal(await ask('Are you willing to work night shifts?'), 'No');
   assert.equal(await ask('Are you comfortable with rotational shifts?'), 'No');
   assert.equal(await ask('Can you work US shift timings?'), 'No');
 });
 
 test('relocation to an unnamed city is left open, not answered Yes', async () => {
-  // relocationAnswer returned '' and the fallback overrode it with "Yes" — the
-  // guardrail has to be part of the classification to actually hold.
   assert.equal(policy.classify('Are you willing to relocate?'), 'relocation');
   assert.equal(policy.mayGuess('Are you willing to relocate?'), false);
   assert.equal(await ask('Are you willing to relocate?'), '');
@@ -193,26 +179,42 @@ test('relocation to an unnamed city is left open, not answered Yes', async () =>
 
 test('a named technology never borrows the total-experience figure', async () => {
   const { asksForSpecificSkillExperience } = require('../answer-utils');
-  // "experience do you have" used to be an exclusion, so this matched the
-  // total-experience branch and claimed 4.1 years of Python.
-  assert.equal(asksForSpecificSkillExperience('How many years of experience do you have with Python?'), true);
-  assert.equal(asksForSpecificSkillExperience('How many years of total work experience do you have?'), false);
-  assert.equal(asksForSpecificSkillExperience('How many years of professional experience do you have?'), false);
+  assert.equal(
+    asksForSpecificSkillExperience('How many years of experience do you have with Python?'),
+    true
+  );
+  assert.equal(
+    asksForSpecificSkillExperience('How many years of total work experience do you have?'),
+    false
+  );
+  assert.equal(
+    asksForSpecificSkillExperience('How many years of professional experience do you have?'),
+    false
+  );
 
-  assert.equal(await ask('How many years of total work experience do you have?', [], 'number'), '4.1');
+  assert.equal(
+    await ask('How many years of total work experience do you have?', [], 'number'),
+    '4.1'
+  );
   assert.equal(await ask('How many years of experience do you have with Java?', [], 'number'), '4');
-  // On the CV but with no year count configured — only the candidate knows.
-  assert.equal(await ask('How many years of experience do you have with Python?', [], 'number'), '');
+  assert.equal(
+    await ask('How many years of experience do you have with Python?', [], 'number'),
+    ''
+  );
 });
 
 test('a technology absent from the CV honestly has zero years', async () => {
-  assert.equal(await ask('How many years of experience do you have with COBOL?', [], 'number'), '0');
-  assert.equal(await ask('How many years of experience do you have with Elixir?', [], 'number'), '0');
+  assert.equal(
+    await ask('How many years of experience do you have with COBOL?', [], 'number'),
+    '0'
+  );
+  assert.equal(
+    await ask('How many years of experience do you have with Elixir?', [], 'number'),
+    '0'
+  );
 });
 
 test('the pronoun "us" is not the United States', async () => {
-  // Matched case-insensitively, /u\.?s\.?/ catches "let us know" and "work with
-  // us" — and then answers No to an authorization question about India.
   assert.deepEqual(policy.countriesMentioned('Are you authorized to work? Let us know.'), []);
   assert.deepEqual(policy.countriesMentioned('Are you authorized to work with us?'), []);
   assert.deepEqual(policy.countriesMentioned('Tell us about your work eligibility'), []);
@@ -237,8 +239,6 @@ test('an abbreviation embedded in a longer word is not a country', () => {
 });
 
 test('"authorized to work without sponsorship" is an authorization question', async () => {
-  // Classified as sponsorship it answers "Yes" — the exact opposite of the truth,
-  // because "yes, I need sponsorship" is right for the other question.
   const q = 'Are you legally authorized to work in the United States without sponsorship?';
   assert.equal(policy.classify(q), 'work_authorization');
   assert.equal(await ask(q), 'No');
@@ -259,14 +259,15 @@ test('a question about requiring sponsorship still classifies as sponsorship', a
 });
 
 test('"visa" in a product name is not a sponsorship question', () => {
-  assert.notEqual(policy.classify('Do you have experience with Visa payment integration?'), 'sponsorship');
+  assert.notEqual(
+    policy.classify('Do you have experience with Visa payment integration?'),
+    'sponsorship'
+  );
 });
 
 test('the cover letter does not volunteer a salary by default', async () => {
   const { generateCoverLetter } = require('../resume-answers');
   const letter = await generateCoverLetter('Backend Engineer', 'Acme');
-  // Naming a number in prose, unprompted, anchors the negotiation before anyone
-  // has spoken to you. The structured salary fields are still filled.
   assert.doesNotMatch(letter, /current CTC|expectation is/i);
   assert.match(letter, /notice period/i);
   assert.match(letter, /Backend Engineer/);

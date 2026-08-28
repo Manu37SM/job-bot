@@ -19,12 +19,8 @@ const PLATFORMS = {
 async function main() {
   if (options.help) return printHelp();
 
-  // Registered before anything opens a browser, so Ctrl+C at any point still winds
-  // down cleanly and still produces a summary and needs-review.md.
   installSignalHandlers();
 
-  // Validate the config before opening a browser. Nothing is applied to if this
-  // finds a hard error.
   if (!runPreflight()) return;
 
   console.log('╔══════════════════════════════════════╗');
@@ -98,8 +94,6 @@ async function main() {
     console.log('│ Nothing was applied to and nothing was logged.');
     console.log('└' + '─'.repeat(38));
 
-    // A count answers "did it work?" but not "are these the right jobs?", which is
-    // the actual question a dry run is asked. Write the list out to be read.
     const file = writeDryRunReport(dryRunTally);
     if (file) console.log(`📝 The jobs it would have applied to → dry-run.md\n`);
     return;
@@ -108,9 +102,6 @@ async function main() {
   printRunSummary();
   printSummary();
 
-  // Regenerate the review report last, so it reflects this run: which questions
-  // blocked the most applications, which jobs are queued for an automatic retry,
-  // and which have been retired.
   writeReviewReport();
 }
 

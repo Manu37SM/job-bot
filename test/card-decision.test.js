@@ -1,7 +1,3 @@
-// Whether a job can be dismissed from its results card alone, without opening it.
-// This is where most of a run's time is now decided: the log shows 216 known jobs
-// accounting for 2,904 sightings, each of which used to cost a click, a navigation
-// and a detail-panel wait.
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -34,11 +30,12 @@ const row = (over) => ({
 
 test('an unseen, unapplied, on-target job is opened', () => {
   seed([]);
-  assert.deepEqual(cardDecision({ jobId: '111', title: 'Senior Java Developer' }), { action: 'open' });
+  assert.deepEqual(cardDecision({ jobId: '111', title: 'Senior Java Developer' }), {
+    action: 'open',
+  });
 });
 
 test('a card with no id falls back to opening the job', () => {
-  // The old path still has to run when LinkedIn gives us nothing to go on.
   seed([]);
   assert.deepEqual(cardDecision({ title: 'Senior Java Developer' }), { action: 'open' });
   assert.deepEqual(cardDecision({}), { action: 'open' });
@@ -81,8 +78,6 @@ test('a title that is plainly the wrong role is skipped without opening', () => 
 });
 
 test('a job seen earlier in the same run is skipped silently', () => {
-  // Bookkeeping, not a new fact about the job — logging it again would just
-  // inflate the seen counter for something already recorded this run.
   seed([]);
   const { seenThisRun } = require('../linkedin');
   assert.equal(cardDecision({ jobId: '111', title: 'Senior Java Developer' }).action, 'open');
@@ -94,10 +89,11 @@ test('a job seen earlier in the same run is skipped silently', () => {
 });
 
 test('the checks are ordered cheapest-first', () => {
-  // "already applied" must win over the title screen: it is the true reason, and
-  // the one that reads correctly in the log.
   seed([row({ status: 'applied', title: 'Senior .NET Developer' })]);
-  assert.equal(cardDecision({ jobId: '111', title: 'Senior .NET Developer' }).reason, 'already applied');
+  assert.equal(
+    cardDecision({ jobId: '111', title: 'Senior .NET Developer' }).reason,
+    'already applied'
+  );
 });
 
 test('a missing title does not by itself cause a skip', () => {

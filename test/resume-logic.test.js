@@ -12,10 +12,6 @@ const YN = ['Yes', 'No'];
 const ask = (q, options = [], type = 'number') => answerQuestion(q, '', '', type, options);
 
 test('the template and the real profile share one implementation', () => {
-  // The template used to carry its own copy of the logic, and it fell behind: it
-  // still claimed a Master's off the back of a bachelor's and still claimed
-  // certifications the CV did not contain, long after both were fixed in the file
-  // people actually ran.
   assert.deepEqual(Object.keys(profile).sort(), Object.keys(example).sort());
   assert.equal(example.answerFromResume("Do you have a Master's degree?", 'radio', YN), 'No');
   assert.equal(example.answerFromResume('Do you hold a PMP certification?', 'radio', YN), 'No');
@@ -32,7 +28,6 @@ test('buildProfile closes over the data it is given', () => {
   assert.equal(other.answerFromResume('Do you have experience with Erlang?', 'radio', YN), 'Yes');
   assert.equal(other.answerFromResume("Do you have a Master's degree?", 'radio', YN), 'Yes');
   assert.equal(other.tenureYears(other.employers[0]), 4);
-  // ...and does not leak into the real profile.
   assert.equal(profile.answerFromResume('Do you have experience with Erlang?', 'radio', YN), 'No');
 });
 
@@ -44,9 +39,6 @@ test('tenure is read from the employment dates, not the whole career', () => {
 });
 
 test('a tenure question is not answered with total career experience', async () => {
-  // "How long have you been at your current company?" contains "how long" and sat
-  // in the generic experience branch, so it answered 4.1 — the whole career at one
-  // employer.
   const tenure = String(profile.tenureYears(profile.employers[0]));
   assert.equal(await ask('How long have you been at your current company?'), tenure);
   assert.equal(await ask('What is your tenure at your current organisation?'), tenure);
@@ -55,12 +47,13 @@ test('a tenure question is not answered with total career experience', async () 
 
 test('a career-length question is still answered with total experience', async () => {
   assert.equal(isTenureQuestion('How long have you been working in software?'), false);
-  assert.equal(await ask('How many years of total work experience do you have?'), String(config.experienceYears));
+  assert.equal(
+    await ask('How many years of total work experience do you have?'),
+    String(config.experienceYears)
+  );
 });
 
 test('"how many years of X" is never answered with a yes/no', async () => {
-  // Every CV skill without a configured year count used to put the literal string
-  // "Yes" into a number field.
   for (const skill of ['Kubernetes', 'Kafka', 'Docker', 'PostgreSQL', 'Angular']) {
     const answer = await ask(`How many years of experience do you have with ${skill}?`);
     assert.doesNotMatch(String(answer), /^(yes|no)$/i, `${skill} answered "${answer}"`);
@@ -76,8 +69,6 @@ test('an opt-in fallback fills unconfigured skill years, capped at total experie
   try {
     config.skillExperienceFallbackYears = 2;
     assert.equal(await ask('How many years of experience do you have with Kubernetes?'), '2');
-    // A stated fallback is the candidate's own claim, and it cannot exceed the
-    // career it sits inside.
     config.skillExperienceFallbackYears = 99;
     assert.equal(
       await ask('How many years of experience do you have with Kubernetes?'),

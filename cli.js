@@ -1,10 +1,6 @@
-// Command-line overrides. Kept in one place so `node index.js --help` is the
-// single source of truth for what the flags do.
 const args = process.argv.slice(2);
 
 function flag(name) {
-  // Single-character names also answer to the conventional short form (-h),
-  // which is what anyone types before reaching for --help.
   return args.includes(`--${name}`) || (name.length === 1 && args.includes(`-${name}`));
 }
 
@@ -23,14 +19,8 @@ function number(name, fallback = null) {
 }
 
 const options = {
-  // Walk the entire pipeline — search, pagination, JD reading, shift and fit
-  // screening — without opening a single application form. The only way to verify
-  // filters and fit rules without spending from a small daily budget, and the only
-  // way to test anything at all while the account is in a cooldown.
   dryRun: flag('dry-run') || flag('dryrun'),
   limit: number('limit'),
-  // Deliberate override of the post-rate-limit hold. Not a flag to reach for
-  // casually — the hold exists because the run after a pause is the dangerous one.
   ignoreCooldown: flag('ignore-cooldown'),
   help: flag('help') || flag('h'),
 };

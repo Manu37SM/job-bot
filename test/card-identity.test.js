@@ -1,14 +1,7 @@
-// readCardIdentity reads the job id, title and company off the results-list card,
-// so a job the log already knows about never has to be opened. The log says that
-// matters: one posting was re-encountered 493 times, and 216 known jobs accounted
-// for 2,904 sightings — each a click and a page wait spent to reach a decision the
-// log could already have made.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readCardIdentity } = require('../linkedin');
 
-// A stand-in for a Playwright element handle: runs the callback against a fake DOM
-// node shaped like the card markup being described.
 function fakeCard(node) {
   return {
     evaluate: async (fn) => fn(node),
@@ -65,7 +58,6 @@ test('an element that throws is handled, not propagated', async () => {
       throw new Error('detached from DOM');
     },
   };
-  // A card can vanish mid-scroll; that must not abort the run.
   assert.deepEqual(await readCardIdentity(hostile), { jobId: '', title: '', company: '' });
 });
 

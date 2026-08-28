@@ -1,11 +1,4 @@
 #!/usr/bin/env node
-// Preflight and audit for the answering logic. No browser, no network, no
-// applications spent — just "what would this bot say, and what has it already said
-// under my name?".
-//
-//   node answers-audit.js                    replay the built-in question corpus
-//   node answers-audit.js --log              show what was actually submitted
-//   node answers-audit.js "question" "A,B"   try one question ad hoc
 const { answerQuestion } = require('./resume-answers');
 const policy = require('./question-policy');
 const { loadLog } = require('./logger');
@@ -14,7 +7,6 @@ const { buildNumericCandidates } = require('./field-value');
 
 const YN = ['Yes', 'No'];
 
-// Real Easy Apply phrasings, grouped by what a wrong answer would cost.
 const CORPUS = [
   ['Contact & basics', 'What is your email address?', []],
   ['Contact & basics', 'Mobile phone number', []],
@@ -90,8 +82,6 @@ const CORPUS = [
 ];
 
 function silence(fn) {
-  // answerQuestion narrates each decision, which is useful during a run and pure
-  // noise in a table of 50 rows.
   const original = console.log;
   console.log = () => {};
   try {
@@ -122,9 +112,6 @@ async function runCorpus() {
 
     if (value) {
       answered++;
-      // A bare number is not what gets typed: smartFill runs it through
-      // buildNumericCandidates first, which is where LPA→rupee conversion and
-      // integer-only coercion happen. Show what would actually be entered.
       let shown = value;
       if (!options.length && /^-?\d+(?:\.\d+)?$/.test(value)) {
         const candidates = buildNumericCandidates(value, question, {
@@ -167,8 +154,6 @@ function auditLog() {
     return;
   }
 
-  // The same question is asked by many companies — show each distinct answer once,
-  // with how often it was given, so an inconsistency stands out immediately.
   const byQuestion = new Map();
   for (const entry of withAnswers) {
     for (const { question, answer } of entry.answers) {
@@ -223,8 +208,6 @@ async function main() {
   await runCorpus();
 }
 
-// Only run when invoked directly — requiring this file (from a test, or from
-// another script) must not start printing a report.
 if (require.main === module) main();
 
 module.exports = { CORPUS, runCorpus, auditLog };
