@@ -20,6 +20,6 @@
     "playwright": "^1.63.0"
   },
   "devDependencies": {
-    "prettier": "^3.9.8"
+    "prettier": "^3.9.9"
   }
 }
