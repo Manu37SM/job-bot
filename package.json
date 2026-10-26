@@ -17,10 +17,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "dotenv": "^18.0.4",
+    "dotenv": "^18.0.8",
     "playwright": "^1.63.0"
   },
   "devDependencies": {
-    "prettier": "^3.9.9"
+    "prettier": "^3.9.10"
   }
 }
