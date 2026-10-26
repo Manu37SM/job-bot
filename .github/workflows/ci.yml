@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # config.js and resume-profile.js are gitignored (personal data); use the examples.
+      - name: Use example config
+        run: |
+          cp config.example.js config.js
+          cp resume-profile.example.js resume-profile.js
+      - name: Format check
+        run: npx prettier --check "*.js" "test/**/*.js" "scripts/*.js"
+      - name: Tests
+        run: npm run test:ci
+      - name: Audit
+        run: npm audit --audit-level=high

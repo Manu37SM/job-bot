@@ -10,7 +10,8 @@
     "audit": "node answers-audit.js",
     "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\"",
     "mutation": "node mutants.js",
-    "stats": "node stats.js"
+    "stats": "node stats.js",
+    "test:ci": "node scripts/test-ci.js"
   },
   "keywords": [],
   "author": "",
