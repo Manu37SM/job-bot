@@ -1,0 +1,20 @@
+a "which of these have you used" group ticks only what is on the CV
+a blank customAnswers entry is a warning, not an error
+a certification the CV does not contain is not claimed
+a configured skill still answers with its number
+a named technology never borrows the total-experience figure
+a resume file input is filled from config.resumePath
+a resume summary contradicting config.experienceYears is flagged
+a tenure question is not answered with total career experience
+an opt-in fallback fills unconfigured skill years, capped at total experience
+known candidate facts are answered without an API call
+known skill-specific experience uses configured skill years
+resume-answers never leaves a yes/no field blank (no AI, all local/CV-based)
+resume-profile detects skills mentioned in the CV
+salary reaches the field with the unit conversion applied
+short numeric answers do not falsely substring-match option text
+skill claims come from the CV — never from an optimistic default
+technologies that ARE on the CV are not needlessly denied
+the shipped config passes with no errors
+valid search settings pass
+yes/no skill questions are unaffected by the quantity guard
