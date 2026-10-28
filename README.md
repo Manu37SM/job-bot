@@ -573,3 +573,15 @@ false claim will arrive in wording nobody wrote a case for.
 - No claimed year count exceeds total experience
 - No credential or degree above the one held is ever claimed
 - Consent boilerplate still gets answered, or forms would never submit
+
+## CI and Dependabot
+
+This is a personal tool and is never deployed, so CI only checks; it does not release.
+`npm run check` runs the same three gates locally that `.github/workflows/ci.yml` runs on
+every push and pull request (Node 22 and 24): `check:private` (fails if `config.js`, `.env`,
+sessions, application history or CVs become tracked, since the repo is public),
+`format:check`, and `test:ci`, followed by `npm audit`.
+
+Dependabot opens one grouped minor/patch PR per week for npm and one for GitHub Actions.
+Major npm versions are ignored deliberately; upgrade those by hand and run
+`npm test` plus a `--dry-run` first. Nothing auto-merges.

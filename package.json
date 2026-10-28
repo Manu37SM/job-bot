@@ -1,6 +1,7 @@
 {
   "name": "linkedin-job-bot",
   "version": "1.0.0",
+  "private": true,
   "description": "LinkedIn Easy Apply automation with deterministic, CV-based answers (no external AI)",
   "main": "index.js",
   "scripts": {
@@ -11,7 +12,14 @@
     "preflight": "node -e \"process.exit(require('./preflight').runPreflight() ? 0 : 1)\"",
     "mutation": "node mutants.js",
     "stats": "node stats.js",
-    "test:ci": "node scripts/test-ci.js"
+    "test:ci": "node scripts/test-ci.js",
+    "format": "prettier --write \"*.js\" \"test/**/*.js\" \"scripts/*.js\"",
+    "format:check": "prettier --check \"*.js\" \"test/**/*.js\" \"scripts/*.js\"",
+    "check:private": "node scripts/check-private-files.js",
+    "check": "npm run check:private && npm run format:check && npm run test:ci"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "keywords": [],
   "author": "",

@@ -1,0 +1,4 @@
+# Keep line endings stable across Windows/Linux so git never shows whole-file diffs.
+* text=auto eol=lf
+*.pdf binary
+*.png binary
