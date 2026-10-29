@@ -15,6 +15,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -26,13 +27,15 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Private files must not be tracked
+        run: npm run check:private
       # config.js and resume-profile.js are gitignored (personal data); use the examples.
       - name: Use example config
         run: |
           cp config.example.js config.js
           cp resume-profile.example.js resume-profile.js
       - name: Format check
-        run: npx prettier --check "*.js" "test/**/*.js" "scripts/*.js"
+        run: npm run format:check
       - name: Tests
         run: npm run test:ci
       - name: Audit

@@ -1,18 +1,39 @@
 version: 2
 updates:
+  # Runtime + dev dependencies. Minor/patch updates are grouped into one PR; major
+  # versions are ignored on purpose (playwright and dotenv majors can change behaviour
+  # the bot depends on) and are upgraded by hand when wanted.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
     groups:
       npm-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels: ["dependencies"]
     commit-message:
       prefix: "deps"
+
+  # Workflow actions. Majors are allowed here (CI-only, gated by the CI run itself) but
+  # grouped so a bump of several actions is one PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["dependencies", "ci"]
     commit-message:
       prefix: "ci"
